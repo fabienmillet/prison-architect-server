@@ -1,3 +1,4 @@
+from time import time
 from typing import Dict, List, Optional, Tuple, cast
 
 from server.consts import ServerType
@@ -32,10 +33,15 @@ from server.settings import Settings
 
 class GameServer(ServerBase):
     _games_manager: GamesManager
+    _pending_disconnects: Dict[Tuple[str, int], float]
+    _disconnect_grace_seconds: int
 
     def __init__(self):
         super().__init__(Settings().get_listen_host(), 4531)
         self._games_manager = GamesManager()
+        self._pending_disconnects = {}
+        # Allow short network hiccups/reconnects before treating as hard disconnect.
+        self._disconnect_grace_seconds = 12
 
     @staticmethod
     def _resolve_player_name(
@@ -55,10 +61,22 @@ class GameServer(ServerBase):
 
     def _cleanup_disconnected_players(self) -> None:
         empty_game_ids: List[str] = []
+        now = time()
 
         for game_id, game in list(self._games_manager.get_games().items()):
             for actor_num, actor_client in list(game.get_connected_players().items()):
+                marker_key = (game_id, actor_num)
+
                 if not actor_client.is_disconnected():
+                    self._pending_disconnects.pop(marker_key, None)
+                    continue
+
+                first_seen = self._pending_disconnects.get(marker_key)
+                if first_seen is None:
+                    self._pending_disconnects[marker_key] = now
+                    continue
+
+                if now - first_seen < self._disconnect_grace_seconds:
                     continue
 
                 player_name = "Unknown"
@@ -73,6 +91,8 @@ class GameServer(ServerBase):
                 except TypeError:
                     pass
 
+                self._pending_disconnects.pop(marker_key, None)
+
                 print_warning(
                     self.get_type(),
                     f'"{player_name}" disconnected unexpectedly and was removed from game "{game_id}"',
@@ -83,6 +103,10 @@ class GameServer(ServerBase):
 
         for game_id in empty_game_ids:
             self._games_manager.remove_game(game_id)
+            # Remove any stale pending markers for the removed game.
+            self._pending_disconnects = {
+                k: v for k, v in self._pending_disconnects.items() if k[0] != game_id
+            }
             print_info(self.get_type(), f'Game "{game_id}" is empty and was removed')
 
     def process(self, do_not_handle: Optional[Tuple[OperationCode, ...]] = None):
