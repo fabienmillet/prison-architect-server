@@ -352,7 +352,7 @@ class PhotonQueue:
                         try:
                             # Some events are extremely frequent on large maps.
                             # Logging each send adds significant overhead.
-                            noisy_codes = {9, 76, 89, 95}
+                            noisy_codes = {2, 3, 9, 13, 14, 47, 76, 89, 95, 118}
                             should_log = (
                                 int(packet.get_payload().operation_code)
                                 not in noisy_codes
