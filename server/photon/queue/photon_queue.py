@@ -1,5 +1,5 @@
 from queue import Empty, Queue
-from socket import SHUT_RDWR, socket
+from socket import socket, timeout as SocketTimeout
 from threading import Thread
 from time import sleep, time
 from types import TracebackType
@@ -51,11 +51,16 @@ class PhotonQueue:
     remote_name: str
 
     _last_keep_alive = 0
+    _keep_alive_soft_timeout: int
+    _keep_alive_hard_timeout: int
     _stream_parser: PhotonStreamParser
 
     def __init__(self, sock: socket, remote_name: str, server_type: ServerType) -> None:
         self._init_time = time()
         self._sock = sock
+        # Use short recv timeout to avoid hard cross-thread shutdown patterns
+        # that can produce RST on some platforms.
+        self._sock.settimeout(1.0)
         self._closing = False
         self._aes_key = None
         self._server_type = server_type
@@ -63,6 +68,10 @@ class PhotonQueue:
         self._incoming = Queue()
         self._outgoing = Queue()
         self._last_keep_alive = time()
+        base_timeout = Settings().get_timeout()
+        # Be resilient to short network stalls once a player is connected.
+        self._keep_alive_soft_timeout = max(base_timeout, 30)
+        self._keep_alive_hard_timeout = max(base_timeout * 4, 120)
         self._stream_parser = PhotonStreamParser()
         self._private_key = None
 
@@ -90,10 +99,6 @@ class PhotonQueue:
             return
         self._closing = True
         try:
-            self._sock.shutdown(SHUT_RDWR)
-        except OSError:
-            pass
-        try:
             self._sock.close()
         except OSError:
             pass
@@ -101,11 +106,16 @@ class PhotonQueue:
     def _recv_data(self, client_sock: socket):
         try:
             data = client_sock.recv(0x1000)
+        except SocketTimeout:
+            return
         except ConnectionResetError:
             print_error(self._server_type, "Failed to recieve! ConnectionResetError")
             self._close_socket()
             return
-        except OSError:
+        except OSError as ex:
+            # 10035: non-blocking operation would block (can happen sporadically).
+            if getattr(ex, "winerror", None) == 10035:
+                return
             self._close_socket()
             return
         if len(data) == 0:
@@ -245,13 +255,21 @@ class PhotonQueue:
     def _check_keep_alive(self):
         while not self._closing:
             sleep(1)
-            if time() - self._last_keep_alive > Settings().get_timeout():
+            idle_seconds = time() - self._last_keep_alive
+            if idle_seconds > self._keep_alive_hard_timeout:
                 print_warning(
                     self._server_type,
-                    f"{self.remote_name} timed out. Closing socket.",
+                    f"{self.remote_name} timed out after {int(idle_seconds)}s idle. Closing socket.",
                 )
                 self._close_socket()
                 self._last_keep_alive = time()
+                continue
+
+            if idle_seconds > self._keep_alive_soft_timeout:
+                print_debug(
+                    self._server_type,
+                    f"{self.remote_name} keep-alive idle for {int(idle_seconds)}s (soft threshold {self._keep_alive_soft_timeout}s).",
+                )
 
     def _handle_send(self):
         while not self._closing:
