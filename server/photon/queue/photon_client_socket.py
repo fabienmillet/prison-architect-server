@@ -60,6 +60,9 @@ class PhotonClientSocket:
     def is_disconnected(self) -> bool:
         return self._queue.is_closed()
 
+    def get_outgoing_depth(self) -> int:
+        return self._queue.get_outgoing_depth()
+
     def set_user_id(self, user_id: int) -> None:
         self._user_id = user_id
 

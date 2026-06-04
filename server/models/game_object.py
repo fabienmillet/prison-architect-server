@@ -10,6 +10,7 @@ from server.photon.packet.header import PhotonDataPacketHeader
 from server.photon.packet.operation_packet import PhotonOperationPacket
 from server.photon.packet.operation_payload import PhotonPacketPayload
 from server.photon.param.hashtable_param import HashtableParameter
+from server.photon.param.int8_param import Int8Parameter
 from server.photon.param.int32_param import Int32Parameter
 from server.photon.param.parameter_key import ParameterKey
 from server.photon.param.slice_param import SliceParameter
@@ -132,11 +133,23 @@ class GameObject(GameListEntry):
             if from_player == -1:
                 raise RuntimeError("Player not found!")
 
+        code_param = event_packet.get_payload().params.get(ParameterKey.Code)
+        is_world_update = (
+            isinstance(code_param, Int8Parameter) and code_param.value == 9
+        )
+
         for actor_num, player in self._connected_players.items():
             if player == from_player:
                 continue
             if to_players is not None and actor_num not in to_players:
                 continue
+
+            # World updates are high-frequency and mostly replace older state.
+            # If a recipient is heavily backlogged, drop older world updates so
+            # critical packets can continue flowing and prevent visible freezes.
+            if is_world_update and player.get_outgoing_depth() > 1000:
+                continue
+
             event_to_send = raised_event_to_event_packet(
                 from_player=from_player, raised_event=event_packet
             )

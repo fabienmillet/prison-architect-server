@@ -107,6 +107,10 @@ class PhotonQueue:
     def is_closed(self) -> bool:
         return self._closing
 
+    def get_outgoing_depth(self) -> int:
+        deferred = 1 if self._deferred_outgoing is not None else 0
+        return deferred + self._outgoing_high.qsize() + self._outgoing.qsize()
+
     def _close_socket(self, reason: str = "unknown") -> None:
         if self._closing:
             return

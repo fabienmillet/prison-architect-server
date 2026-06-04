@@ -28,7 +28,8 @@ def _process_internal(server_instance: ServerBase) -> None:
         print_packet_log(server_instance.get_type(), packet, printer=print_error)
 
     if not had_packets:
-        sleep(0.1)
+        # Lower idle polling delay to reduce visible stutter on forwarded gameplay events.
+        sleep(0.01)
 
 
 def _name_server():
