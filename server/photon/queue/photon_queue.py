@@ -37,6 +37,7 @@ class PhotonQueue:
     _incoming: Queue["PhotonDataPacket"]
     _outgoing_high: Queue["PhotonPacket"]
     _outgoing: Queue["PhotonPacket"]
+    _deferred_outgoing: Optional["PhotonPacket"]
 
     _sock: socket
 
@@ -73,6 +74,7 @@ class PhotonQueue:
         self._incoming = Queue()
         self._outgoing_high = Queue()
         self._outgoing = Queue()
+        self._deferred_outgoing = None
         self._last_keep_alive = time()
         self._last_close_reason = None
         base_timeout = Settings().get_timeout()
@@ -297,13 +299,17 @@ class PhotonQueue:
 
     def _handle_send(self):
         while not self._closing:
-            try:
-                outgoing_packet = self._outgoing_high.get_nowait()
-            except Empty:
+            if self._deferred_outgoing is not None:
+                outgoing_packet = self._deferred_outgoing
+                self._deferred_outgoing = None
+            else:
                 try:
-                    outgoing_packet = self._outgoing.get(timeout=0.5)
+                    outgoing_packet = self._outgoing_high.get_nowait()
                 except Empty:
-                    continue
+                    try:
+                        outgoing_packet = self._outgoing.get(timeout=0.5)
+                    except Empty:
+                        continue
             try:
                 packets_to_send = [outgoing_packet]
                 while len(packets_to_send) < self._max_send_batch_packets:
@@ -338,7 +344,8 @@ class PhotonQueue:
                         and total_batch_size + len(serialized_data)
                         > self._max_send_batch_bytes
                     ):
-                        self.push(packet)
+                        # Preserve strict order: this packet must be next on the wire.
+                        self._deferred_outgoing = packet
                         break
 
                     send_chunks.append(serialized_data)
@@ -372,7 +379,7 @@ class PhotonQueue:
                     self._server_type,
                     f"Send timeout to {self.remote_name}; keeping connection open and retrying later.",
                 )
-                self._outgoing.put(outgoing_packet)
+                self._deferred_outgoing = outgoing_packet
                 continue
             except OSError as e:
                 if getattr(e, "winerror", None) == 10038:  # Socket closed
