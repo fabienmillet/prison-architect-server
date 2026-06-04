@@ -348,11 +348,20 @@ class PhotonQueue:
                         isinstance(packet, PhotonOperationPacket)
                         and Settings().get_verbosity() <= 0
                     ):
-                        msg = f"Queue send: {packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {packet.get_payload().get_operation_name()}"
-                        print_debug(
-                            self._server_type,
-                            msg,
-                        )
+                        should_log = True
+                        try:
+                            # WorldUpdate (event code 9) is extremely frequent.
+                            # Logging every packet adds significant overhead.
+                            should_log = int(packet.get_payload().operation_code) != 9
+                        except Exception:
+                            should_log = True
+
+                        if should_log:
+                            msg = f"Queue send: {packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {packet.get_payload().get_operation_name()}"
+                            print_debug(
+                                self._server_type,
+                                msg,
+                            )
 
                     if (
                         send_chunks

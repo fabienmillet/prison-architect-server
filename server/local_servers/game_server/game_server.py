@@ -36,6 +36,7 @@ class GameServer(ServerBase):
     _disconnect_grace_seconds: int
     _empty_game_since: Dict[str, float]
     _empty_game_ttl_seconds: int
+    _world_update_log_counter: int
 
     def __init__(self):
         super().__init__(Settings().get_listen_host(), 4531)
@@ -46,6 +47,7 @@ class GameServer(ServerBase):
         self._empty_game_since = {}
         # Keep empty games for a while so clients can reconnect without losing the room.
         self._empty_game_ttl_seconds = 300
+        self._world_update_log_counter = 0
 
     @staticmethod
     def _resolve_player_name(
@@ -402,10 +404,18 @@ class GameServer(ServerBase):
             params.get(ParameterKey.Actors, None),
         )
 
-        print_debug(
-            self.get_type(),
-            f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
-        )
+        if event_code.value == 9:
+            self._world_update_log_counter += 1
+            if payload_length >= 2000 or self._world_update_log_counter % 100 == 0:
+                print_debug(
+                    self.get_type(),
+                    f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
+                )
+        else:
+            print_debug(
+                self.get_type(),
+                f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
+            )
 
         to_players = None
         if recieving_actors is not None:

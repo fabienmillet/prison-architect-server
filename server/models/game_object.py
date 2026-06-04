@@ -1,3 +1,4 @@
+from time import monotonic
 from typing import Dict, List, Optional, cast
 
 from server.local_servers.common import raised_event_to_event_packet
@@ -21,6 +22,7 @@ class GameObject(GameListEntry):
     _custom_properties: GameProperties
     _connected_players: Dict[int, PhotonClientSocket]  # ActorNr: Player
     _next_player_num: int
+    _last_world_update_forward_at: Dict[int, float]
 
     def __init__(
         self,
@@ -44,6 +46,7 @@ class GameObject(GameListEntry):
         self._custom_properties = GameProperties()
         self._connected_players = {}
         self._next_player_num = 0
+        self._last_world_update_forward_at = {}
 
     def update_custom_properties(self, custom_properties: GameProperties):
         self._custom_properties.update(custom_properties)
@@ -110,6 +113,7 @@ class GameObject(GameListEntry):
 
     def remove_player(self, player_num: int):
         self._connected_players.pop(player_num, None)
+        self._last_world_update_forward_at.pop(player_num, None)
         self.player_count = len(self._connected_players)
 
     def _new_player_num(self) -> int:
@@ -137,6 +141,7 @@ class GameObject(GameListEntry):
         is_world_update = (
             isinstance(code_param, Int8Parameter) and code_param.value == 9
         )
+        now = monotonic()
 
         for actor_num, player in self._connected_players.items():
             if player == from_player:
@@ -149,6 +154,14 @@ class GameObject(GameListEntry):
             # critical packets can continue flowing and prevent visible freezes.
             if is_world_update and player.get_outgoing_depth() > 1000:
                 continue
+
+            if is_world_update:
+                # Cap world-update forwarding rate per recipient to avoid client
+                # saturation on very large maps while keeping gameplay responsive.
+                last_forward = self._last_world_update_forward_at.get(actor_num, 0.0)
+                if now - last_forward < 0.02:
+                    continue
+                self._last_world_update_forward_at[actor_num] = now
 
             event_to_send = raised_event_to_event_packet(
                 from_player=from_player, raised_event=event_packet
