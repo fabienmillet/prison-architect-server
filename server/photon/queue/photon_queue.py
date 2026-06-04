@@ -1,4 +1,5 @@
 from queue import Empty, Queue
+from select import select
 from socket import socket, timeout as SocketTimeout
 from threading import Thread
 from time import sleep, time
@@ -51,6 +52,7 @@ class PhotonQueue:
     remote_name: str
 
     _last_keep_alive = 0
+    _last_close_reason: Optional[str]
     _keep_alive_soft_timeout: int
     _keep_alive_hard_timeout: int
     _stream_parser: PhotonStreamParser
@@ -58,9 +60,8 @@ class PhotonQueue:
     def __init__(self, sock: socket, remote_name: str, server_type: ServerType) -> None:
         self._init_time = time()
         self._sock = sock
-        # Use short recv timeout to avoid hard cross-thread shutdown patterns
-        # that can produce RST on some platforms.
-        self._sock.settimeout(1.0)
+        # Keep socket blocking for sendall stability on large payload bursts.
+        self._sock.settimeout(None)
         self._closing = False
         self._aes_key = None
         self._server_type = server_type
@@ -68,6 +69,7 @@ class PhotonQueue:
         self._incoming = Queue()
         self._outgoing = Queue()
         self._last_keep_alive = time()
+        self._last_close_reason = None
         base_timeout = Settings().get_timeout()
         # Be resilient to short network stalls once a player is connected.
         self._keep_alive_soft_timeout = max(base_timeout, 30)
@@ -94,32 +96,41 @@ class PhotonQueue:
     def is_closed(self) -> bool:
         return self._closing
 
-    def _close_socket(self) -> None:
+    def _close_socket(self, reason: str = "unknown") -> None:
         if self._closing:
             return
         self._closing = True
+        self._last_close_reason = reason
+        print_warning(
+            self._server_type,
+            f"Closing socket for {self.remote_name}. Reason: {reason}",
+        )
         try:
             self._sock.close()
         except OSError:
             pass
 
     def _recv_data(self, client_sock: socket):
+        ready, _, _ = select([client_sock], [], [], 1.0)
+        if not ready:
+            return
+
         try:
-            data = client_sock.recv(0x1000)
+            data = client_sock.recv(0x10000)
         except SocketTimeout:
             return
         except ConnectionResetError:
             print_error(self._server_type, "Failed to recieve! ConnectionResetError")
-            self._close_socket()
+            self._close_socket("recv_connection_reset")
             return
         except OSError as ex:
             # 10035: non-blocking operation would block (can happen sporadically).
             if getattr(ex, "winerror", None) == 10035:
                 return
-            self._close_socket()
+            self._close_socket(f"recv_os_error:{type(ex).__name__}:{ex}")
             return
         if len(data) == 0:
-            self._close_socket()
+            self._close_socket("recv_eof")
             return
 
         # The client may stop sending keep alives, but so long as they are active everything is fine.
@@ -184,7 +195,7 @@ class PhotonQueue:
         exc_val: Optional[BaseException],
         exc_tb: Optional[TracebackType],
     ) -> None:
-        self._close_socket()
+        self._close_socket("context_exit")
         self._recv_worker.join(5)
         self._send_worker.join(5)
         self._check_keep_alive_worker.join(5)
@@ -261,7 +272,7 @@ class PhotonQueue:
                     self._server_type,
                     f"{self.remote_name} timed out after {int(idle_seconds)}s idle. Closing socket.",
                 )
-                self._close_socket()
+                self._close_socket(f"keep_alive_hard_timeout:{int(idle_seconds)}s")
                 self._last_keep_alive = time()
                 continue
 
@@ -295,28 +306,35 @@ class PhotonQueue:
                     self._server_type,
                     f"Failed to send! ConnectionAbortedError on {self.remote_name}",
                 )
-                self._close_socket()
+                self._close_socket("send_connection_aborted")
                 return
+            except SocketTimeout:
+                print_warning(
+                    self._server_type,
+                    f"Send timeout to {self.remote_name}; keeping connection open and retrying later.",
+                )
+                self._outgoing.put(outgoing_packet)
+                continue
             except OSError as e:
-                if e.winerror == 10038:  # Socket closed
+                if getattr(e, "winerror", None) == 10038:  # Socket closed
                     print_debug(
                         self._server_type,
                         f"Tried to send on a closed socket to {self.remote_name}",
                     )
-                    self._close_socket()
+                    self._close_socket("send_on_closed_socket_10038")
                     return
                 print_error(
                     self._server_type,
                     f"Socket send failed on {self.remote_name}: {type(e).__name__}: {e}",
                 )
-                self._close_socket()
+                self._close_socket(f"send_os_error:{type(e).__name__}:{e}")
                 return
             except Exception as ex:
                 print_error(
                     self._server_type,
                     f"Unexpected send failure on {self.remote_name}: {type(ex).__name__}: {ex}",
                 )
-                self._close_socket()
+                self._close_socket(f"send_unexpected:{type(ex).__name__}:{ex}")
                 return
 
     def _handle_recv(self):
@@ -328,15 +346,15 @@ class PhotonQueue:
                     self._server_type,
                     f"Receive from {self.remote_name} failed. ConnectionAbortedError",
                 )
-                self._close_socket()
+                self._close_socket("recv_connection_aborted")
                 return
-            except OSError:
-                self._close_socket()
+            except OSError as ex:
+                self._close_socket(f"recv_loop_os_error:{type(ex).__name__}:{ex}")
                 return
             except Exception as ex:
                 print_error(
                     self._server_type,
                     f"Unexpected receive failure from {self.remote_name}: {type(ex).__name__}: {ex}",
                 )
-                self._close_socket()
+                self._close_socket(f"recv_unexpected:{type(ex).__name__}:{ex}")
                 return

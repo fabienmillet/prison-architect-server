@@ -31,7 +31,14 @@ def raised_event_to_event_packet(
         ParameterKey.Data: raised_event.get_payload().params[ParameterKey.Data],
     }
 
-    header = PhotonDataPacketHeader(CommandCode.Event)
+    # Preserve encryption mode from the incoming RaiseEvent payload.
+    command = (
+        CommandCode.EncryptedEvent
+        if raised_event.get_header().is_encrypted()
+        else CommandCode.Event
+    )
+
+    header = PhotonDataPacketHeader(command)
     event_packet = PhotonOperationPacket(
         header=header,
         payload=PhotonPacketPayload(

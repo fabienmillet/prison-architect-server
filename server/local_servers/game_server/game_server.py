@@ -435,18 +435,17 @@ class GameServer(ServerBase):
 
         current_game = self._games_manager[game_id]
 
-        update_event = PacketFactory.operation(
-            CommandCode.EncryptedEvent,
-            cast(OperationCode, 0xFD),  # PropertiesChanged event
-            {
-                ParameterKey.TargetActorNr: Int32Parameter(actor_num),
-                ParameterKey.Properties: client.get_custom_properties().to_hashtable(),
-            },
-        )
-
         for other_num, other_client in current_game.get_connected_players().items():
             if other_num == actor_num:
                 continue
+            update_event = PacketFactory.operation(
+                CommandCode.EncryptedEvent,
+                cast(OperationCode, 0xFD),  # PropertiesChanged event
+                {
+                    ParameterKey.TargetActorNr: Int32Parameter(actor_num),
+                    ParameterKey.Properties: client.get_custom_properties().to_hashtable(),
+                },
+            )
             other_client.send(update_event)
 
     def _handle_leave_game(
