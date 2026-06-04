@@ -1,5 +1,6 @@
 from time import monotonic
 from typing import Dict, List, Optional, Tuple, cast
+from zlib import crc32
 
 from server.local_servers.common import raised_event_to_event_packet
 from server.models.actor_properties import ActorProperties
@@ -24,6 +25,8 @@ class GameObject(GameListEntry):
     _next_player_num: int
     _last_world_update_forward_at: Dict[int, float]
     _last_event_forward_at: Dict[Tuple[int, int], float]
+    _player_joined_at: Dict[int, float]
+    _last_large_state_sig: Dict[int, int]
 
     def __init__(
         self,
@@ -49,6 +52,8 @@ class GameObject(GameListEntry):
         self._next_player_num = 0
         self._last_world_update_forward_at = {}
         self._last_event_forward_at = {}
+        self._player_joined_at = {}
+        self._last_large_state_sig = {}
 
     def update_custom_properties(self, custom_properties: GameProperties):
         self._custom_properties.update(custom_properties)
@@ -59,6 +64,7 @@ class GameObject(GameListEntry):
             Int32Parameter(actor_num)
         ]
         self._connected_players[actor_num] = player
+        self._player_joined_at[actor_num] = monotonic()
         self.player_count = len(self._connected_players)
 
         # Start from the client's actual actor properties so we keep fields like color.
@@ -116,6 +122,8 @@ class GameObject(GameListEntry):
     def remove_player(self, player_num: int):
         self._connected_players.pop(player_num, None)
         self._last_world_update_forward_at.pop(player_num, None)
+        self._player_joined_at.pop(player_num, None)
+        self._last_large_state_sig.pop(player_num, None)
         self._last_event_forward_at = {
             k: v for k, v in self._last_event_forward_at.items() if k[0] != player_num
         }
@@ -145,15 +153,19 @@ class GameObject(GameListEntry):
         code_param = event_packet.get_payload().params.get(ParameterKey.Code)
         event_code = code_param.value if isinstance(code_param, Int8Parameter) else -1
         is_world_update = event_code == 9
-        is_micro_spam_event = event_code in {13, 14, 22, 76, 89, 95}
+        is_micro_spam_event = event_code in {13, 14, 22, 76, 89, 93, 95, 118}
+        is_large_state_event = event_code == 3
 
         payload_size = 0
+        payload_bytes: Optional[bytes] = None
         payload_param = event_packet.get_payload().params.get(ParameterKey.Data)
         if payload_param is not None:
             try:
-                payload_size = len(payload_param.serialize())
+                payload_bytes = payload_param.serialize()
+                payload_size = len(payload_bytes)
             except Exception:
                 payload_size = 0
+                payload_bytes = None
 
         now = monotonic()
 
@@ -164,11 +176,13 @@ class GameObject(GameListEntry):
                 continue
 
             queue_depth = player.get_outgoing_depth()
+            joined_at = self._player_joined_at.get(actor_num, now)
+            join_age = now - joined_at
 
             # World updates are high-frequency and mostly replace older state.
             # If a recipient is heavily backlogged, drop older world updates so
             # critical packets can continue flowing and prevent visible freezes.
-            if is_world_update and queue_depth > 1000:
+            if is_world_update and queue_depth > 400:
                 continue
 
             if is_world_update:
@@ -192,6 +206,33 @@ class GameObject(GameListEntry):
                     min_gap = 0.05
                 if now - last_forward < min_gap:
                     continue
+                self._last_event_forward_at[key] = now
+
+            if is_large_state_event and payload_size >= 8000 and join_age > 8.0:
+                # Event 3 often carries large world chunks. After the initial join
+                # phase, smooth burst rate under pressure to prevent client freezes.
+                key = (actor_num, event_code)
+                last_forward = self._last_event_forward_at.get(key, 0.0)
+
+                min_gap = 0.0
+                if queue_depth > 700:
+                    min_gap = 0.2
+                elif queue_depth > 450:
+                    min_gap = 0.12
+                elif queue_depth > 250:
+                    min_gap = 0.08
+
+                if min_gap > 0 and now - last_forward < min_gap:
+                    continue
+
+                # Drop immediate duplicates of large state blobs when congested.
+                if queue_depth > 450 and payload_bytes is not None:
+                    state_sig = crc32(payload_bytes)
+                    prev_sig = self._last_large_state_sig.get(actor_num)
+                    if prev_sig == state_sig and now - last_forward < 0.5:
+                        continue
+                    self._last_large_state_sig[actor_num] = state_sig
+
                 self._last_event_forward_at[key] = now
 
             event_to_send = raised_event_to_event_packet(
