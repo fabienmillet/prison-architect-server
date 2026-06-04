@@ -19,7 +19,9 @@ from server.photon.packet.operation_packet import PhotonOperationPacket
 
 
 class PhotonStreamParser:
-    MAX_PACKET_LENGTH = 4 * 1024 * 1024
+    # Large maps can produce very large event payloads; keep a safety cap but avoid
+    # disconnecting valid clients because of overly strict packet limits.
+    MAX_PACKET_LENGTH = 16 * 1024 * 1024
 
     def __init__(self):
         # This persistent buffer survives across multiple socket.recv() calls

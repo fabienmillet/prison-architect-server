@@ -368,23 +368,24 @@ class GameServer(ServerBase):
     def _handle_raise_event(
         self, client: PhotonClientSocket, packet: PhotonOperationPacket
     ):
-        if (
-            len(packet.get_payload().params) != 2
-            and len(packet.get_payload().params) != 3
-        ):
-            print_packet_log(self.get_type(), packet)
-            raise RuntimeError(
-                f'Expected 2 or 3 params for "RaiseEvent", got {len(packet.get_payload().params)}'
+        params = packet.get_payload().params
+
+        if ParameterKey.Code not in params or ParameterKey.Data not in params:
+            print_warning(
+                self.get_type(),
+                f'Ignoring malformed RaiseEvent from {client.get_address()}: missing required params (keys={list(params.keys())})',
             )
+            print_packet_log(self.get_type(), packet)
+            return
 
         game_id = client.get_game_id()
         current_game = self._games_manager[game_id]
 
-        event_code = cast(Int8Parameter, packet.get_payload().params[ParameterKey.Code])
-        data = cast(Int8SliceParameter, packet.get_payload().params[ParameterKey.Data])
+        event_code = cast(Int8Parameter, params[ParameterKey.Code])
+        data = cast(Int8SliceParameter, params[ParameterKey.Data])
         recieving_actors = cast(
             SliceParameter[Int32Parameter] | None,
-            packet.get_payload().params.get(ParameterKey.Actors, None),
+            params.get(ParameterKey.Actors, None),
         )
 
         print_debug(
