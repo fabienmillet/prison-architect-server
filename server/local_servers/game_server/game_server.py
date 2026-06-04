@@ -37,8 +37,6 @@ class GameServer(ServerBase):
     _empty_game_since: Dict[str, float]
     _empty_game_ttl_seconds: int
     _world_update_log_counter: int
-    _last_props_broadcast_at: Dict[Tuple[str, int], float]
-    _last_props_broadcast_sig: Dict[Tuple[str, int], str]
 
     def __init__(self):
         super().__init__(Settings().get_listen_host(), 4531)
@@ -50,8 +48,6 @@ class GameServer(ServerBase):
         # Keep empty games for a while so clients can reconnect without losing the room.
         self._empty_game_ttl_seconds = 300
         self._world_update_log_counter = 0
-        self._last_props_broadcast_at = {}
-        self._last_props_broadcast_sig = {}
 
     @staticmethod
     def _resolve_player_name(
@@ -408,6 +404,8 @@ class GameServer(ServerBase):
             params.get(ParameterKey.Actors, None),
         )
 
+        noisy_codes = {2, 3, 13, 14, 22, 47, 76, 89, 93, 95, 118, 119}
+
         if event_code.value == 9:
             self._world_update_log_counter += 1
             if payload_length >= 5000 or self._world_update_log_counter % 500 == 0:
@@ -415,7 +413,15 @@ class GameServer(ServerBase):
                     self.get_type(),
                     f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
                 )
-        elif event_code.value in (13, 14, 22, 76, 89, 95):
+        elif event_code.value == 3:
+            self._world_update_log_counter += 1
+            # Event 3 can be very frequent and large; sample aggressively.
+            if payload_length >= 30000 or self._world_update_log_counter % 250 == 0:
+                print_debug(
+                    self.get_type(),
+                    f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
+                )
+        elif event_code.value in noisy_codes:
             self._world_update_log_counter += 1
             if self._world_update_log_counter % 300 == 0:
                 print_debug(
@@ -470,21 +476,6 @@ class GameServer(ServerBase):
 
         current_game = self._games_manager[game_id]
         props_snapshot = client.get_custom_properties().to_hashtable()
-        now = time()
-        cache_key = (game_id, actor_num)
-        props_sig = repr(props_snapshot.value)
-
-        # Coalesce ultra-frequent SetProperties updates to avoid flooding peers.
-        last_sig = self._last_props_broadcast_sig.get(cache_key)
-        last_ts = self._last_props_broadcast_at.get(cache_key, 0.0)
-        if props_sig == last_sig and now - last_ts < 0.5:
-            return
-        if now - last_ts < 0.05:
-            self._last_props_broadcast_sig[cache_key] = props_sig
-            return
-
-        self._last_props_broadcast_sig[cache_key] = props_sig
-        self._last_props_broadcast_at[cache_key] = now
 
         for other_num, other_client in current_game.get_connected_players().items():
             if other_num == actor_num:
