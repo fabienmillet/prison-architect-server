@@ -35,6 +35,7 @@ from server.settings import Settings
 
 class PhotonQueue:
     _incoming: Queue["PhotonDataPacket"]
+    _outgoing_high: Queue["PhotonPacket"]
     _outgoing: Queue["PhotonPacket"]
 
     _sock: socket
@@ -70,6 +71,7 @@ class PhotonQueue:
         self._server_type = server_type
         self.remote_name = remote_name
         self._incoming = Queue()
+        self._outgoing_high = Queue()
         self._outgoing = Queue()
         self._last_keep_alive = time()
         self._last_close_reason = None
@@ -168,7 +170,7 @@ class PhotonQueue:
                             self._handle_init_request(packet)
                             continue
                         if isinstance(packet, InitEncryptionRequest):
-                            self._outgoing.put(self._handle_dh_request(packet))
+                            self.push(self._handle_dh_request(packet), high_priority=True)
                             continue
                         elif isinstance(packet, InitEncryptionResponse):
                             self._handle_dh_response(packet)
@@ -215,7 +217,10 @@ class PhotonQueue:
         except Empty:
             return None
 
-    def push(self, packet: PhotonPacket) -> None:
+    def push(self, packet: PhotonPacket, high_priority: bool = False) -> None:
+        if high_priority:
+            self._outgoing_high.put(packet)
+            return
         self._outgoing.put(packet)
 
     def _handle_dh_request(self, request_packet: InitEncryptionRequest):
@@ -256,8 +261,9 @@ class PhotonQueue:
             )
             return
         self._last_keep_alive = time()
-        self._outgoing.put(
-            PhotonKeepAliveResponse(self.get_uptime(), packet.get_client_time())
+        self.push(
+            PhotonKeepAliveResponse(self.get_uptime(), packet.get_client_time()),
+            high_priority=True,
         )
 
     def get_uptime(self) -> int:
@@ -265,10 +271,10 @@ class PhotonQueue:
 
     def _handle_init_response(self, _packet: InitResponsePacket) -> None:
         dh_req = self.craft_dh_request()
-        self.push(dh_req)
+        self.push(dh_req, high_priority=True)
 
     def _handle_init_request(self, _packet: InitRequestPacket) -> None:
-        self.push(InitResponsePacket())
+        self.push(InitResponsePacket(), high_priority=True)
 
     def _check_keep_alive(self):
         while not self._closing:
@@ -292,12 +298,21 @@ class PhotonQueue:
     def _handle_send(self):
         while not self._closing:
             try:
-                outgoing_packet = self._outgoing.get(timeout=0.5)
+                outgoing_packet = self._outgoing_high.get_nowait()
             except Empty:
-                continue
+                try:
+                    outgoing_packet = self._outgoing.get(timeout=0.5)
+                except Empty:
+                    continue
             try:
                 packets_to_send = [outgoing_packet]
                 while len(packets_to_send) < self._max_send_batch_packets:
+                    try:
+                        packets_to_send.append(self._outgoing_high.get_nowait())
+                        continue
+                    except Empty:
+                        pass
+
                     try:
                         packets_to_send.append(self._outgoing.get_nowait())
                     except Empty:
@@ -323,7 +338,7 @@ class PhotonQueue:
                         and total_batch_size + len(serialized_data)
                         > self._max_send_batch_bytes
                     ):
-                        self._outgoing.put(packet)
+                        self.push(packet)
                         break
 
                     send_chunks.append(serialized_data)
@@ -337,7 +352,7 @@ class PhotonQueue:
                 self._sock.sendall(b"".join(send_chunks))
                 self._last_keep_alive = time()
 
-                queue_depth = self._outgoing.qsize()
+                queue_depth = self._outgoing_high.qsize() + self._outgoing.qsize()
                 now = time()
                 if queue_depth > 2000 and (now - self._last_backpressure_log) >= 5:
                     print_warning(
