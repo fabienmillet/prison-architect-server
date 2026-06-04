@@ -7,40 +7,56 @@ from server.log import print_error, print_packet_log
 
 
 def _process_internal(server_instance: ServerBase) -> None:
-    packets = list(
-        (
-            client,
-            packet,
-        )
-        for client, packet in server_instance.process()
-    )
-    if not packets:
-        sleep(0.1)
-        return
-    for client, packet in packets:
+    had_packets = False
+    for client, packet in server_instance.process():
+        had_packets = True
         print_error(
             server_instance.get_type(),
             f"[{type(server_instance).__name__}] Unhandled Packet From {client.get_address()}",
         )
         print_packet_log(server_instance.get_type(), packet, printer=print_error)
 
+    if not had_packets:
+        sleep(0.1)
+
 
 def _name_server():
     with NameServer() as name_server:
         while True:
-            _process_internal(name_server)
+            try:
+                _process_internal(name_server)
+            except Exception as ex:
+                print_error(
+                    name_server.get_type(),
+                    f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
+                )
+                sleep(0.1)
 
 
 def _master_server():
     with MasterServer() as master_server:
         while True:
-            _process_internal(master_server)
+            try:
+                _process_internal(master_server)
+            except Exception as ex:
+                print_error(
+                    master_server.get_type(),
+                    f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
+                )
+                sleep(0.1)
 
 
 def _game_server():
     with GameServer() as game_server:
         while True:
-            _process_internal(game_server)
+            try:
+                _process_internal(game_server)
+            except Exception as ex:
+                print_error(
+                    game_server.get_type(),
+                    f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
+                )
+                sleep(0.1)
 
 
 def main():

@@ -35,6 +35,35 @@ _If your friends are on a different network than you, such as at their house and
    2) Replace `[YOUR_IP_ADDRESS]` with your public IP address.
 5) _(optional)_ If your connection isn't strong, try adding `--timeout 30` to the command.
 
+## Docker & CI/CD
+This repository now includes a Docker image workflow for GitHub Container Registry (GHCR).
+
+### Build locally
+```bash
+docker build -t prison-architect-server:local .
+docker run --rm -p 4530-4533:4530-4533 \
+   -e PUBLIC_IP=127.0.0.1 \
+   prison-architect-server:local
+```
+
+### GitHub Actions workflow
+The workflow is in `.github/workflows/docker-image.yml`.
+
+- On push to `master`: builds and pushes `ghcr.io/<owner>/<repo>:latest` and a SHA tag.
+- On tag `v*`: builds and pushes version tags.
+- On pull request: build-only validation (no push).
+
+## Pterodactyl Egg
+An importable egg is provided at:
+
+- `deploy/pterodactyl/egg-prison-architect-server.json`
+
+After import:
+
+1) Set your Docker image to your built GHCR image.
+2) Configure `PUBLIC_IP`, `TIMEOUT`, `REGION`, and `MAX_PLAYERS` in the egg variables.
+3) Expose/forward TCP ports `4530-4533`.
+
 
 ## Legal Notice
 

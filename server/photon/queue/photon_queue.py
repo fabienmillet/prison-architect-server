@@ -1,5 +1,5 @@
 from queue import Empty, Queue
-from socket import socket
+from socket import SHUT_RDWR, socket
 from threading import Thread
 from time import sleep, time
 from types import TracebackType
@@ -82,16 +82,34 @@ class PhotonQueue:
     def get_aes_key(self) -> bytes | None:
         return self._aes_key
 
+    def is_closed(self) -> bool:
+        return self._closing
+
+    def _close_socket(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self._sock.shutdown(SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
     def _recv_data(self, client_sock: socket):
         try:
             data = client_sock.recv(0x1000)
         except ConnectionResetError:
             print_error(self._server_type, "Failed to recieve! ConnectionResetError")
-            sleep(0.1)
+            self._close_socket()
             return
         except OSError:
+            self._close_socket()
             return
         if len(data) == 0:
+            self._close_socket()
             return
 
         # The client may stop sending keep alives, but so long as they are active everything is fine.
@@ -99,36 +117,46 @@ class PhotonQueue:
 
         self._stream_parser.feed(data)
 
-        for packet in self._stream_parser.parse(
-            expect_responses=False,
-            aes_key=self._aes_key,
-        ):
-            try:
-                if isinstance(packet, PhotonKeepAlive):
-                    self._handle_keep_alive(packet)
-                    continue
-                else:
-                    assert isinstance(
-                        packet, PhotonDataPacket
-                    ), f'Expected "PhotonDataPacket", got {type(packet).__name__}'
-                    if isinstance(packet, InitResponsePacket):
-                        self._handle_init_response(packet)
+        try:
+            for packet in self._stream_parser.parse(
+                expect_responses=False,
+                aes_key=self._aes_key,
+            ):
+                try:
+                    if isinstance(packet, PhotonKeepAlive):
+                        self._handle_keep_alive(packet)
                         continue
-                    elif isinstance(packet, InitRequestPacket):
-                        self._handle_init_request(packet)
-                        continue
-                    if isinstance(packet, InitEncryptionRequest):
-                        self._outgoing.put(self._handle_dh_request(packet))
-                        continue
-                    elif isinstance(packet, InitEncryptionResponse):
-                        self._handle_dh_response(packet)
-                        continue
-                    self._incoming.put(packet)
-            except RuntimeError as ex:
-                print_error(
-                    self._server_type,
-                    f"Failed to process packet from {self.remote_name}! Exception: {ex}, Raw: {packet.serialize().hex()}",
-                )
+                    else:
+                        if not isinstance(packet, PhotonDataPacket):
+                            print_warning(
+                                self._server_type,
+                                f"Ignoring unexpected packet type from {self.remote_name}: {type(packet).__name__}",
+                            )
+                            continue
+                        if isinstance(packet, InitResponsePacket):
+                            self._handle_init_response(packet)
+                            continue
+                        elif isinstance(packet, InitRequestPacket):
+                            self._handle_init_request(packet)
+                            continue
+                        if isinstance(packet, InitEncryptionRequest):
+                            self._outgoing.put(self._handle_dh_request(packet))
+                            continue
+                        elif isinstance(packet, InitEncryptionResponse):
+                            self._handle_dh_response(packet)
+                            continue
+                        self._incoming.put(packet)
+                except RuntimeError as ex:
+                    print_error(
+                        self._server_type,
+                        f"Failed to process packet from {self.remote_name}! Exception: {ex}, Raw: {packet.serialize().hex()}",
+                    )
+        except Exception as ex:
+            print_error(
+                self._server_type,
+                f"Malformed stream from {self.remote_name}. Closing socket. Exception: {type(ex).__name__}: {ex}",
+            )
+            self._close_socket()
 
     def set_aes_key(self, key: bytes) -> None:
         self._aes_key = key
@@ -145,11 +173,7 @@ class PhotonQueue:
         exc_val: Optional[BaseException],
         exc_tb: Optional[TracebackType],
     ) -> None:
-        try:
-            self._sock.close()
-        except Exception:
-            pass
-        self._closing = True
+        self._close_socket()
         self._recv_worker.join(5)
         self._send_worker.join(5)
         self._check_keep_alive_worker.join(5)
@@ -196,7 +220,12 @@ class PhotonQueue:
     def _handle_keep_alive(self, packet: PhotonKeepAlive) -> None:
         if isinstance(packet, PhotonKeepAliveResponse):
             return
-        assert isinstance(packet, PhotonKeepAliveRequest)
+        if not isinstance(packet, PhotonKeepAliveRequest):
+            print_warning(
+                self._server_type,
+                f"Ignoring unexpected keep-alive packet from {self.remote_name}: {type(packet).__name__}",
+            )
+            return
         self._last_keep_alive = time()
         self._outgoing.put(
             PhotonKeepAliveResponse(self.get_uptime(), packet.get_client_time())
@@ -220,13 +249,15 @@ class PhotonQueue:
                     self._server_type,
                     f"{self.remote_name} timed out. Closing socket.",
                 )
-                self._sock.close()
+                self._close_socket()
                 self._last_keep_alive = time()
-                self._closing = True
 
     def _handle_send(self):
         while not self._closing:
-            outgoing_packet = self._outgoing.get()
+            try:
+                outgoing_packet = self._outgoing.get(timeout=0.5)
+            except Empty:
+                continue
             self._recrypt(outgoing_packet)
             serialized_data = outgoing_packet.serialize()
             if isinstance(outgoing_packet, PhotonOperationPacket):
@@ -236,13 +267,29 @@ class PhotonQueue:
                     msg,
                 )
             try:
+                if self._closing:
+                    return
                 self._sock.sendall(serialized_data)
             except ConnectionAbortedError:
                 print_error(
                     self._server_type,
                     f"Failed to send! ConnectionAbortedError on {self.remote_name}",
                 )
-                self._closing = True
+                self._close_socket()
+                return
+            except OSError as e:
+                if e.winerror == 10038:  # Socket closed
+                    print_debug(
+                        self._server_type,
+                        f"Tried to send on a closed socket to {self.remote_name}",
+                    )
+                    self._close_socket()
+                    return
+                print_error(
+                    self._server_type,
+                    f"Socket send failed on {self.remote_name}: {type(e).__name__}: {e}",
+                )
+                self._close_socket()
                 return
 
     def _handle_recv(self):
@@ -254,5 +301,15 @@ class PhotonQueue:
                     self._server_type,
                     f"Receive from {self.remote_name} failed. ConnectionAbortedError",
                 )
-                self._closing = True
+                self._close_socket()
+                return
+            except OSError:
+                self._close_socket()
+                return
+            except Exception as ex:
+                print_error(
+                    self._server_type,
+                    f"Unexpected receive failure from {self.remote_name}: {type(ex).__name__}: {ex}",
+                )
+                self._close_socket()
                 return

@@ -1,4 +1,5 @@
 import json
+from json import JSONDecodeError
 from socket import socket
 from typing import Generator, Optional, Tuple, cast
 
@@ -55,6 +56,9 @@ class PhotonClientSocket:
 
     def get_aes_key(self) -> bytes | None:
         return self._queue.get_aes_key()
+
+    def is_disconnected(self) -> bool:
+        return self._queue.is_closed()
 
     def set_user_id(self, user_id: int) -> None:
         self._user_id = user_id
@@ -177,12 +181,20 @@ class PhotonClientSocket:
 
     @staticmethod
     def enrich_with_token_data(client: "PhotonClientSocket", token: str) -> None:
-        token_data = json.loads(token)
+        try:
+            token_data = json.loads(token)
+        except JSONDecodeError:
+            return
+
+        if not isinstance(token_data, dict):
+            return
 
         client._connected_to_game_id = token_data.get(
             "connected_to_game_id", client._connected_to_game_id
         )
-        client._user_id = token_data.get("user_id", client._user_id)
+        user_id = token_data.get("user_id", client._user_id)
+        if isinstance(user_id, int) or user_id is None:
+            client._user_id = user_id
 
     def get_address(self) -> str:
         return f"{self._addr[0]}:{self._addr[1]}"

@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 from server.local_servers.common import raised_event_to_event_packet
 from server.models.actor_properties import ActorProperties
@@ -55,10 +55,12 @@ class GameObject(GameListEntry):
         self._connected_players[actor_num] = player
         self.player_count = len(self._connected_players)
 
-        actor_props = ActorProperties()
-        actor_props.player_name = player.get_user_name()
-        actor_props.user_id = str(player.get_user_id())
-        actor_props.ping = 0
+        # Start from the client's actual actor properties so we keep fields like color.
+        actor_props = ActorProperties(player.get_custom_properties().to_hashtable())
+        if actor_props.player_name == "":
+            actor_props.player_name = player.get_user_name()
+        if actor_props.user_id == "":
+            actor_props.user_id = str(player.get_user_id())
 
         actors_props = HashtableParameter(
             {Int32Parameter(actor_num): actor_props.to_hashtable()}
@@ -80,6 +82,24 @@ class GameObject(GameListEntry):
                             ParameterKey.ActorProperties: actors_props,
                         },
                         header=header,
+                        response_debug_data=None,
+                    ),
+                )
+            )
+
+            # Some clients apply display fields (name/color) from PropertiesChanged.
+            # Push the full actor properties right after join to avoid "?" placeholders.
+            props_header = PhotonDataPacketHeader(CommandCode.EncryptedEvent)
+            old_player.send(
+                PhotonOperationPacket(
+                    header=props_header,
+                    payload=PhotonPacketPayload(
+                        operation_code=cast(OperationCode, 0xFD),
+                        params={
+                            ParameterKey.TargetActorNr: Int32Parameter(actor_num),
+                            ParameterKey.Properties: actor_props.to_hashtable(),
+                        },
+                        header=props_header,
                         response_debug_data=None,
                     ),
                 )

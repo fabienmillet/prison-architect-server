@@ -62,6 +62,14 @@ if __name__ == "__main__":
         help='The name shown in the "Region" selection box.',
     )
 
+    parser.add_argument(
+        "--max-players",
+        type=int,
+        default=4,
+        required=False,
+        help="Maximum players per game room (safe test range: 4-8).",
+    )
+
     args = parser.parse_args()
 
     Settings().set(
@@ -70,6 +78,7 @@ if __name__ == "__main__":
         ip=args.ip,
         timeout=args.timeout,
         region_name=args.region,
+        max_players=args.max_players,
     )
 
     if args.mode == "proxy":

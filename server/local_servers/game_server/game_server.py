@@ -36,6 +36,22 @@ class GameServer(ServerBase):
         super().__init__(Settings().get_listen_host(), 4531)
         self._games_manager = GamesManager()
 
+    @staticmethod
+    def _resolve_player_name(
+        packet: PhotonOperationPacket, actor_properties: ActorProperties
+    ) -> str:
+        name_from_actor_props = actor_properties.player_name.strip()
+        if name_from_actor_props != "":
+            return name_from_actor_props
+
+        nickname = packet.get_payload().params.get(ParameterKey.Nickname)
+        if isinstance(nickname, StringParameter):
+            fallback_name = nickname.value.strip()
+            if fallback_name != "":
+                return fallback_name
+
+        return "Unknown"
+
     def process(self, do_not_handle: Optional[Tuple[OperationCode, ...]] = None):
         extra_ops = (
             OperationCode.CreateGame,
@@ -89,8 +105,10 @@ class GameServer(ServerBase):
         actor_properties = ActorProperties(
             cast(ActorPropertiesHashtable, params.get(ParameterKey.ActorProperties))
         )
-        requesting_player_name = actor_properties.player_name
+        requesting_player_name = self._resolve_player_name(packet, actor_properties)
+        actor_properties.player_name = requesting_player_name
         client.set_user_name(requesting_player_name)
+        client.update_custom_properties(actor_properties)
 
         game_properties = GameProperties(
             cast(GamePropertiesTable, params.get(ParameterKey.GameProperties))
@@ -98,7 +116,8 @@ class GameServer(ServerBase):
         game_id = cast(StringParameter, params.get(ParameterKey.GameId)).value
         game_owner = game_properties.game_master
         password_required = game_properties.is_password_protected
-        player_capacity = game_properties.player_capacity
+        configured_capacity = Settings().get_max_players()
+        player_capacity = configured_capacity
         print_success(
             self.get_type(),
             f'"{requesting_player_name}" ({client.get_address()}) created game "{game_id}"',
@@ -114,6 +133,10 @@ class GameServer(ServerBase):
         new_num = created_game.join_player(client)
         client.join_game(game_id, new_num)
 
+        creator_props = ActorProperties(client.get_custom_properties().to_hashtable())
+        creator_props.player_name = requesting_player_name
+        creator_props.user_id = str(client.get_user_id())
+
         props = GameProperties()
         props.is_visible = True
         props.is_open = True
@@ -122,8 +145,8 @@ class GameServer(ServerBase):
         props.master_client_id = new_num
         props.player_ttl = 0
         props.empty_room_ttl = 0
-        props.max_players_int = 4
-        props.player_capacity = 4
+        props.max_players_int = configured_capacity
+        props.player_capacity = configured_capacity
         props.props_listed_in_lobby = ["MAS", "PA"]
 
         client.send(
@@ -132,6 +155,9 @@ class GameServer(ServerBase):
                 OperationCode.CreateGame,
                 {
                     ParameterKey.ActorNr: Int32Parameter(new_num),
+                    ParameterKey.ActorProperties: HashtableParameter(
+                        {Int32Parameter(new_num): creator_props.to_hashtable()}
+                    ),
                     ParameterKey.GameProperties: props.to_hashtable(),
                     ParameterKey.Actors: SliceParameter([Int32Parameter(new_num)]),
                     ParameterKey.AuthMode: Int32Parameter(11),
@@ -168,7 +194,6 @@ class GameServer(ServerBase):
                     ),
                     ParameterKey.ActorProperties: actors_props,
                 },
-                return_code=0,
             )
         )
 
@@ -182,7 +207,8 @@ class GameServer(ServerBase):
             )
         )
 
-        requestor_name = requesting_actor_properties.player_name
+        requestor_name = self._resolve_player_name(packet, requesting_actor_properties)
+        requesting_actor_properties.player_name = requestor_name
 
         client.set_user_name(requestor_name)
         client.update_custom_properties(requesting_actor_properties)
@@ -198,6 +224,17 @@ class GameServer(ServerBase):
                     OperationCode.JoinGame,
                     return_code=-1,
                     error_message=f"Game does not exist (on {Settings().get_ip()})!",
+                )
+            )
+            return
+
+        if requested_game.player_count >= requested_game.player_capacity:
+            client.send(
+                PacketFactory.operation(
+                    CommandCode.OperationResponse,
+                    OperationCode.JoinGame,
+                    return_code=-1,
+                    error_message="Game is full",
                 )
             )
             return
@@ -228,16 +265,13 @@ class GameServer(ServerBase):
         game_props.master_client_id = 1
         game_props.player_ttl = 0
         game_props.empty_room_ttl = 0
-        game_props.max_players_int = 4
+        game_props.max_players_int = requested_game.player_capacity
         game_props.props_listed_in_lobby = ["MAS", "PA"]
 
         client.join_game(requested_game.get_id(), actor_number)
         actors = [
             Int32Parameter(x)
-            for x in [
-                *list(requested_game.get_connected_players().keys()),
-                actor_number,
-            ]
+            for x in requested_game.get_connected_players().keys()
         ]
 
         client.send(
@@ -257,7 +291,8 @@ class GameServer(ServerBase):
             )
         )
 
-        self._send_encrypted_join_event(client, actor_number, requested_game)
+        # JoinGame response already includes the full actor list and actor properties.
+        # Sending an additional join event to the same client can cause duplicate/partial actor state.
 
     def _handle_raise_event(
         self, client: PhotonClientSocket, packet: PhotonOperationPacket
@@ -305,7 +340,9 @@ class GameServer(ServerBase):
         self, client: PhotonClientSocket, packet: PhotonOperationPacket
     ):
         params = packet.get_payload().params
-        properties = cast(ActorProperties, params.get(ParameterKey.Properties))
+        properties = ActorProperties(
+            cast(ActorPropertiesHashtable, params.get(ParameterKey.Properties))
+        )
         client.update_custom_properties(properties)
 
         # Return an ACK
@@ -316,6 +353,29 @@ class GameServer(ServerBase):
                 return_code=0,
             )
         )
+
+        # Broadcast updated actor properties to other players in the same room.
+        try:
+            game_id = client.get_game_id()
+            actor_num = client.get_in_game_user_num()
+        except ValueError:
+            return
+
+        current_game = self._games_manager[game_id]
+
+        update_event = PacketFactory.operation(
+            CommandCode.EncryptedEvent,
+            cast(OperationCode, 0xFD),  # PropertiesChanged event
+            {
+                ParameterKey.TargetActorNr: Int32Parameter(actor_num),
+                ParameterKey.Properties: client.get_custom_properties().to_hashtable(),
+            },
+        )
+
+        for other_num, other_client in current_game.get_connected_players().items():
+            if other_num == actor_num:
+                continue
+            other_client.send(update_event)
 
     def _handle_leave_game(
         self, client: PhotonClientSocket, packet: PhotonOperationPacket
