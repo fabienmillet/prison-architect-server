@@ -87,9 +87,14 @@ class PhotonQueue:
         else:
             self._keep_alive_soft_timeout = max(base_timeout, 30)
             self._keep_alive_hard_timeout = max(base_timeout * 4, 120)
-        # Batch outgoing packets to reduce syscall overhead during large-map bursts.
-        self._max_send_batch_bytes = 512 * 1024
-        self._max_send_batch_packets = 64
+        # Batch outgoing packets to reduce syscall overhead while avoiding huge
+        # one-shot bursts that can overwhelm some game clients.
+        if self._server_type == ServerType.GameServer:
+            self._max_send_batch_bytes = 64 * 1024
+            self._max_send_batch_packets = 16
+        else:
+            self._max_send_batch_bytes = 256 * 1024
+            self._max_send_batch_packets = 32
         self._last_backpressure_log = 0
         self._stream_parser = PhotonStreamParser()
         self._private_key = None
