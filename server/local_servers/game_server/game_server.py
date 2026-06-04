@@ -22,7 +22,6 @@ from server.photon.packet.factory import PacketFactory
 from server.photon.packet.operation_packet import PhotonOperationPacket
 from server.photon.param.hashtable_param import HashtableParameter
 from server.photon.param.int8_param import Int8Parameter
-from server.photon.param.int8_slice_param import Int8SliceParameter
 from server.photon.param.int32_param import Int32Parameter
 from server.photon.param.parameter_key import ParameterKey
 from server.photon.param.slice_param import SliceParameter
@@ -381,8 +380,23 @@ class GameServer(ServerBase):
         game_id = client.get_game_id()
         current_game = self._games_manager[game_id]
 
-        event_code = cast(Int8Parameter, params[ParameterKey.Code])
-        data = cast(Int8SliceParameter, params[ParameterKey.Data])
+        code_param = params[ParameterKey.Code]
+        if not isinstance(code_param, Int8Parameter):
+            print_warning(
+                self.get_type(),
+                f"Ignoring malformed RaiseEvent from {client.get_address()}: Code is {type(code_param).__name__}, expected Int8Parameter",
+            )
+            return
+
+        event_code = code_param
+        data_param = params[ParameterKey.Data]
+
+        payload_length = 0
+        try:
+            payload_length = len(data_param.serialize())
+        except Exception:
+            payload_length = -1
+
         recieving_actors = cast(
             SliceParameter[Int32Parameter] | None,
             params.get(ParameterKey.Actors, None),
@@ -390,7 +404,7 @@ class GameServer(ServerBase):
 
         print_debug(
             self.get_type(),
-            f"Raising event {event_code.value} for game {game_id} with data (length): {len(data.value)}",
+            f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
         )
 
         to_players = None

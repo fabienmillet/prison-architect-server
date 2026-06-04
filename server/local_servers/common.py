@@ -26,10 +26,14 @@ def raised_event_to_event_packet(
         OperationCode,
         cast(Int8Parameter, raised_event.get_payload().params[ParameterKey.Code]).value,
     )
+
+    # Keep optional event parameters to preserve client behavior on complex maps.
     params: CommandParams = {
-        ParameterKey.ActorNr: Int32Parameter(sender_num),
-        ParameterKey.Data: raised_event.get_payload().params[ParameterKey.Data],
+        k: v
+        for k, v in raised_event.get_payload().params.items()
+        if k not in (ParameterKey.Code, ParameterKey.Actors)
     }
+    params[ParameterKey.ActorNr] = Int32Parameter(sender_num)
 
     # Preserve encryption mode from the incoming RaiseEvent payload.
     command = (
