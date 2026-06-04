@@ -37,7 +37,6 @@ class PhotonQueue:
     _incoming: Queue["PhotonDataPacket"]
     _outgoing_high: Queue["PhotonPacket"]
     _outgoing: Queue["PhotonPacket"]
-    _deferred_outgoing: Optional["PhotonPacket"]
 
     _sock: socket
 
@@ -57,9 +56,6 @@ class PhotonQueue:
     _last_close_reason: Optional[str]
     _keep_alive_soft_timeout: int
     _keep_alive_hard_timeout: int
-    _max_send_batch_bytes: int
-    _max_send_batch_packets: int
-    _last_backpressure_log: float
     _stream_parser: PhotonStreamParser
 
     def __init__(self, sock: socket, remote_name: str, server_type: ServerType) -> None:
@@ -74,7 +70,6 @@ class PhotonQueue:
         self._incoming = Queue()
         self._outgoing_high = Queue()
         self._outgoing = Queue()
-        self._deferred_outgoing = None
         self._last_keep_alive = time()
         self._last_close_reason = None
         base_timeout = Settings().get_timeout()
@@ -87,15 +82,6 @@ class PhotonQueue:
         else:
             self._keep_alive_soft_timeout = max(base_timeout, 30)
             self._keep_alive_hard_timeout = max(base_timeout * 4, 120)
-        # Batch outgoing packets to reduce syscall overhead while avoiding huge
-        # one-shot bursts that can overwhelm some game clients.
-        if self._server_type == ServerType.GameServer:
-            self._max_send_batch_bytes = 64 * 1024
-            self._max_send_batch_packets = 16
-        else:
-            self._max_send_batch_bytes = 256 * 1024
-            self._max_send_batch_packets = 32
-        self._last_backpressure_log = 0
         self._stream_parser = PhotonStreamParser()
         self._private_key = None
 
@@ -314,103 +300,32 @@ class PhotonQueue:
 
     def _handle_send(self):
         while not self._closing:
-            if self._deferred_outgoing is not None:
-                outgoing_packet = self._deferred_outgoing
-                self._deferred_outgoing = None
-            else:
-                try:
-                    outgoing_packet = self._outgoing_high.get_nowait()
-                except Empty:
-                    try:
-                        outgoing_packet = self._outgoing.get(timeout=0.5)
-                    except Empty:
-                        continue
             try:
-                packets_to_send = [outgoing_packet]
-                while len(packets_to_send) < self._max_send_batch_packets:
-                    try:
-                        packets_to_send.append(self._outgoing_high.get_nowait())
-                        continue
-                    except Empty:
-                        pass
+                outgoing_packet = self._outgoing_high.get_nowait()
+            except Empty:
+                try:
+                    outgoing_packet = self._outgoing.get(timeout=0.5)
+                except Empty:
+                    continue
+            try:
+                self._recrypt(outgoing_packet)
+                serialized_data = outgoing_packet.serialize()
 
-                    try:
-                        packets_to_send.append(self._outgoing.get_nowait())
-                    except Empty:
-                        break
-
-                send_chunks = []
-                total_batch_size = 0
-                for packet in packets_to_send:
-                    self._recrypt(packet)
-                    serialized_data = packet.serialize()
-                    if (
-                        isinstance(packet, PhotonOperationPacket)
-                        and Settings().get_verbosity() <= 0
-                    ):
-                        should_log = True
-                        try:
-                            # Some events are extremely frequent on large maps.
-                            # Logging each send adds significant overhead.
-                            noisy_codes = {
-                                2,
-                                3,
-                                9,
-                                13,
-                                14,
-                                22,
-                                47,
-                                76,
-                                89,
-                                93,
-                                95,
-                                118,
-                                119,
-                                252,  # SetProperties
-                                253,  # RaiseEvent/PropertiesChanged
-                            }
-                            should_log = (
-                                int(packet.get_payload().operation_code)
-                                not in noisy_codes
-                            )
-                        except Exception:
-                            should_log = True
-
-                        if should_log:
-                            msg = f"Queue send: {packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {packet.get_payload().get_operation_name()}"
-                            print_debug(
-                                self._server_type,
-                                msg,
-                            )
-
-                    if (
-                        send_chunks
-                        and total_batch_size + len(serialized_data)
-                        > self._max_send_batch_bytes
-                    ):
-                        # Preserve strict order: this packet must be next on the wire.
-                        self._deferred_outgoing = packet
-                        break
-
-                    send_chunks.append(serialized_data)
-                    total_batch_size += len(serialized_data)
+                if (
+                    isinstance(outgoing_packet, PhotonOperationPacket)
+                    and Settings().get_verbosity() <= 0
+                ):
+                    msg = f"Queue send: {outgoing_packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {outgoing_packet.get_payload().get_operation_name()}"
+                    print_debug(
+                        self._server_type,
+                        msg,
+                    )
 
                 if self._closing:
                     return
-                if not send_chunks:
-                    continue
 
-                self._sock.sendall(b"".join(send_chunks))
+                self._sock.sendall(serialized_data)
                 self._last_keep_alive = time()
-
-                queue_depth = self._outgoing_high.qsize() + self._outgoing.qsize()
-                now = time()
-                if queue_depth > 2000 and (now - self._last_backpressure_log) >= 5:
-                    print_warning(
-                        self._server_type,
-                        f"Backpressure on {self.remote_name}: outgoing queue depth={queue_depth}",
-                    )
-                    self._last_backpressure_log = now
             except ConnectionAbortedError:
                 print_error(
                     self._server_type,
@@ -418,13 +333,6 @@ class PhotonQueue:
                 )
                 self._close_socket("send_connection_aborted")
                 return
-            except SocketTimeout:
-                print_warning(
-                    self._server_type,
-                    f"Send timeout to {self.remote_name}; keeping connection open and retrying later.",
-                )
-                self._deferred_outgoing = outgoing_packet
-                continue
             except OSError as e:
                 if getattr(e, "winerror", None) == 10038:  # Socket closed
                     print_debug(
