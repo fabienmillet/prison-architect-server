@@ -33,42 +33,66 @@ def _process_internal(server_instance: ServerBase) -> None:
 
 
 def _name_server():
-    with NameServer() as name_server:
-        while True:
-            try:
-                _process_internal(name_server)
-            except Exception as ex:
-                print_error(
-                    name_server.get_type(),
-                    f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
-                )
-                sleep(0.1)
+    while True:
+        try:
+            with NameServer() as name_server:
+                while True:
+                    try:
+                        _process_internal(name_server)
+                    except Exception as ex:
+                        print_error(
+                            name_server.get_type(),
+                            f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
+                        )
+                        sleep(0.1)
+        except Exception as ex:
+            print_error(
+                ServerType.NameServer,
+                f"NameServer crashed outside process loop and will restart: {type(ex).__name__}: {ex}",
+            )
+            sleep(1)
 
 
 def _master_server():
-    with MasterServer() as master_server:
-        while True:
-            try:
-                _process_internal(master_server)
-            except Exception as ex:
-                print_error(
-                    master_server.get_type(),
-                    f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
-                )
-                sleep(0.1)
+    while True:
+        try:
+            with MasterServer() as master_server:
+                while True:
+                    try:
+                        _process_internal(master_server)
+                    except Exception as ex:
+                        print_error(
+                            master_server.get_type(),
+                            f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
+                        )
+                        sleep(0.1)
+        except Exception as ex:
+            print_error(
+                ServerType.MasterServer,
+                f"MasterServer crashed outside process loop and will restart: {type(ex).__name__}: {ex}",
+            )
+            sleep(1)
 
 
 def _game_server():
-    with GameServer() as game_server:
-        while True:
-            try:
-                _process_internal(game_server)
-            except Exception as ex:
-                print_error(
-                    game_server.get_type(),
-                    f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
-                )
-                sleep(0.1)
+    while True:
+        try:
+            with GameServer() as game_server:
+                while True:
+                    try:
+                        _process_internal(game_server)
+                    except Exception as ex:
+                        print_error(
+                            game_server.get_type(),
+                            f"Unhandled server loop exception: {type(ex).__name__}: {ex}",
+                        )
+                        sleep(0.1)
+        except Exception as ex:
+            print_error(
+                ServerType.GameServer,
+                f"GameServer crashed outside process loop and will restart: {type(ex).__name__}: {ex}",
+            )
+            sleep(1)
 
 
 def main():

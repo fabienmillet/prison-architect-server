@@ -77,18 +77,28 @@ class PhotonQueueDispatcher:
                     break
                 continue
 
-            # Increase OS socket buffers to better absorb bursty large-map traffic.
-            sock.setsockopt(SOL_SOCKET, SO_SNDBUF, 1024 * 1024)
-            sock.setsockopt(SOL_SOCKET, SO_RCVBUF, 1024 * 1024)
-            print_success(
-                self._server_type, f"New client connected: {addr[0]}:{addr[1]}"
-            )
-            with self._clients_lock:
-                self._clients.append(
-                    PhotonClientSocket(
-                        sock=sock, addr=addr, server_type=self._server_type
-                    )
+            try:
+                # Increase OS socket buffers to better absorb bursty large-map traffic.
+                sock.setsockopt(SOL_SOCKET, SO_SNDBUF, 1024 * 1024)
+                sock.setsockopt(SOL_SOCKET, SO_RCVBUF, 1024 * 1024)
+                print_success(
+                    self._server_type, f"New client connected: {addr[0]}:{addr[1]}"
                 )
+                with self._clients_lock:
+                    self._clients.append(
+                        PhotonClientSocket(
+                            sock=sock, addr=addr, server_type=self._server_type
+                        )
+                    )
+            except Exception as ex:
+                print_error(
+                    self._server_type,
+                    f"Failed to initialize client {addr[0]}:{addr[1]}: {type(ex).__name__}: {ex}",
+                )
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def process(
         self,

@@ -79,8 +79,14 @@ class PhotonQueue:
         self._last_close_reason = None
         base_timeout = Settings().get_timeout()
         # Be resilient to short network stalls once a player is connected.
-        self._keep_alive_soft_timeout = max(base_timeout, 30)
-        self._keep_alive_hard_timeout = max(base_timeout * 4, 120)
+        if self._server_type in (ServerType.NameServer, ServerType.MasterServer):
+            # Discovery/auth sockets are often idle for long periods. Closing them
+            # aggressively causes reconnect churn that can cascade into game drops.
+            self._keep_alive_soft_timeout = max(base_timeout * 10, 300)
+            self._keep_alive_hard_timeout = max(base_timeout * 20, 1800)
+        else:
+            self._keep_alive_soft_timeout = max(base_timeout, 30)
+            self._keep_alive_hard_timeout = max(base_timeout * 4, 120)
         # Batch outgoing packets to reduce syscall overhead during large-map bursts.
         self._max_send_batch_bytes = 512 * 1024
         self._max_send_batch_packets = 64

@@ -42,10 +42,10 @@ class GameServer(ServerBase):
         self._games_manager = GamesManager()
         self._pending_disconnects = {}
         # Allow network hiccups/reconnect loops before treating as hard disconnect.
-        self._disconnect_grace_seconds = 45
+        self._disconnect_grace_seconds = 180
         self._empty_game_since = {}
         # Keep empty games for a while so clients can reconnect without losing the room.
-        self._empty_game_ttl_seconds = 180
+        self._empty_game_ttl_seconds = 300
 
     @staticmethod
     def _resolve_player_name(
