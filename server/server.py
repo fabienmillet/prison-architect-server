@@ -1,14 +1,25 @@
 from threading import Thread
 from time import sleep
 
+from server.consts import ServerType
 from server.local_servers import GameServer, MasterServer, NameServer
 from server.local_servers.server_base import ServerBase
 from server.log import print_error, print_packet_log
+from server.photon.operation_code import OperationCode
+from server.photon.packet.operation_packet import PhotonOperationPacket
 
 
 def _process_internal(server_instance: ServerBase) -> None:
     had_packets = False
     for client, packet in server_instance.process():
+        if (
+            server_instance.get_type() == ServerType.NameServer
+            and isinstance(packet, PhotonOperationPacket)
+            and packet.get_payload().operation_code == OperationCode.RaiseEvent
+        ):
+            # NameServer is discovery/auth only; gameplay RaiseEvent noise is ignored.
+            continue
+
         had_packets = True
         print_error(
             server_instance.get_type(),
