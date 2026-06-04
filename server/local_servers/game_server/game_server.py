@@ -35,13 +35,18 @@ class GameServer(ServerBase):
     _games_manager: GamesManager
     _pending_disconnects: Dict[Tuple[str, int], float]
     _disconnect_grace_seconds: int
+    _empty_game_since: Dict[str, float]
+    _empty_game_ttl_seconds: int
 
     def __init__(self):
         super().__init__(Settings().get_listen_host(), 4531)
         self._games_manager = GamesManager()
         self._pending_disconnects = {}
-        # Allow short network hiccups/reconnects before treating as hard disconnect.
-        self._disconnect_grace_seconds = 12
+        # Allow network hiccups/reconnect loops before treating as hard disconnect.
+        self._disconnect_grace_seconds = 45
+        self._empty_game_since = {}
+        # Keep empty games for a while so clients can reconnect without losing the room.
+        self._empty_game_ttl_seconds = 180
 
     @staticmethod
     def _resolve_player_name(
@@ -99,7 +104,13 @@ class GameServer(ServerBase):
                 )
 
             if game.player_count == 0:
-                empty_game_ids.append(game_id)
+                empty_since = self._empty_game_since.get(game_id)
+                if empty_since is None:
+                    self._empty_game_since[game_id] = now
+                elif now - empty_since >= self._empty_game_ttl_seconds:
+                    empty_game_ids.append(game_id)
+            else:
+                self._empty_game_since.pop(game_id, None)
 
         for game_id in empty_game_ids:
             self._games_manager.remove_game(game_id)
@@ -107,6 +118,7 @@ class GameServer(ServerBase):
             self._pending_disconnects = {
                 k: v for k, v in self._pending_disconnects.items() if k[0] != game_id
             }
+            self._empty_game_since.pop(game_id, None)
             print_info(self.get_type(), f'Game "{game_id}" is empty and was removed')
 
     def process(self, do_not_handle: Optional[Tuple[OperationCode, ...]] = None):
