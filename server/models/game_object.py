@@ -108,7 +108,7 @@ class GameObject(GameListEntry):
         return actor_num
 
     def remove_player(self, player_num: int):
-        self._connected_players.pop(player_num)
+        self._connected_players.pop(player_num, None)
         self.player_count = len(self._connected_players)
 
     def _new_player_num(self) -> int:

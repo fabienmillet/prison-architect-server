@@ -152,11 +152,12 @@ class PhotonQueue:
                         f"Failed to process packet from {self.remote_name}! Exception: {ex}, Raw: {packet.serialize().hex()}",
                     )
         except Exception as ex:
-            print_error(
+            print_warning(
                 self._server_type,
-                f"Malformed stream from {self.remote_name}. Closing socket. Exception: {type(ex).__name__}: {ex}",
+                f"Malformed stream from {self.remote_name}. Dropping buffered bytes and continuing. Exception: {type(ex).__name__}: {ex}",
             )
-            self._close_socket()
+            self._stream_parser.buffer.clear()
+            return
 
     def set_aes_key(self, key: bytes) -> None:
         self._aes_key = key
@@ -258,18 +259,19 @@ class PhotonQueue:
                 outgoing_packet = self._outgoing.get(timeout=0.5)
             except Empty:
                 continue
-            self._recrypt(outgoing_packet)
-            serialized_data = outgoing_packet.serialize()
-            if isinstance(outgoing_packet, PhotonOperationPacket):
-                msg = f"Sending: {outgoing_packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {outgoing_packet.get_payload().get_operation_name()}"
-                print_debug(
-                    self._server_type,
-                    msg,
-                )
             try:
+                self._recrypt(outgoing_packet)
+                serialized_data = outgoing_packet.serialize()
+                if isinstance(outgoing_packet, PhotonOperationPacket):
+                    msg = f"Sending: {outgoing_packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {outgoing_packet.get_payload().get_operation_name()}"
+                    print_debug(
+                        self._server_type,
+                        msg,
+                    )
                 if self._closing:
                     return
                 self._sock.sendall(serialized_data)
+                self._last_keep_alive = time()
             except ConnectionAbortedError:
                 print_error(
                     self._server_type,
@@ -288,6 +290,13 @@ class PhotonQueue:
                 print_error(
                     self._server_type,
                     f"Socket send failed on {self.remote_name}: {type(e).__name__}: {e}",
+                )
+                self._close_socket()
+                return
+            except Exception as ex:
+                print_error(
+                    self._server_type,
+                    f"Unexpected send failure on {self.remote_name}: {type(ex).__name__}: {ex}",
                 )
                 self._close_socket()
                 return

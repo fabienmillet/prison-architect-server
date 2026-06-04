@@ -15,7 +15,7 @@ EXPOSE 4530 4531 4532 4533
 # Runtime variables can be overridden by Docker or Pterodactyl.
 ENV LISTEN_HOST=0.0.0.0 \
     PUBLIC_IP=127.0.0.1 \
-    TIMEOUT=10 \
+    TIMEOUT=30 \
     REGION=local \
     MAX_PLAYERS=4
 

@@ -9,6 +9,7 @@ from server.log import (
     print_info,
     print_packet_log,
     print_success,
+    print_warning,
 )
 from server.models.actor_properties import ActorProperties, ActorPropertiesHashtable
 from server.models.game_object import GameObject
@@ -52,7 +53,41 @@ class GameServer(ServerBase):
 
         return "Unknown"
 
+    def _cleanup_disconnected_players(self) -> None:
+        empty_game_ids: List[str] = []
+
+        for game_id, game in list(self._games_manager.get_games().items()):
+            for actor_num, actor_client in list(game.get_connected_players().items()):
+                if not actor_client.is_disconnected():
+                    continue
+
+                player_name = "Unknown"
+                try:
+                    player_name = actor_client.get_user_name()
+                except ValueError:
+                    pass
+
+                game.remove_player(actor_num)
+                try:
+                    actor_client.leave_game()
+                except TypeError:
+                    pass
+
+                print_warning(
+                    self.get_type(),
+                    f'"{player_name}" disconnected unexpectedly and was removed from game "{game_id}"',
+                )
+
+            if game.player_count == 0:
+                empty_game_ids.append(game_id)
+
+        for game_id in empty_game_ids:
+            self._games_manager.remove_game(game_id)
+            print_info(self.get_type(), f'Game "{game_id}" is empty and was removed')
+
     def process(self, do_not_handle: Optional[Tuple[OperationCode, ...]] = None):
+        self._cleanup_disconnected_players()
+
         extra_ops = (
             OperationCode.CreateGame,
             OperationCode.JoinLobby,

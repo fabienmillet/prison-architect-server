@@ -49,7 +49,7 @@ if __name__ == "__main__":
         "--timeout",
         type=int,
         help="Grace period between client keep alives before closing sockets.",
-        default=10,
+        default=30,
         required=False,
     )
 
