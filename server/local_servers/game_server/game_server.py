@@ -406,7 +406,14 @@ class GameServer(ServerBase):
 
         if event_code.value == 9:
             self._world_update_log_counter += 1
-            if payload_length >= 2000 or self._world_update_log_counter % 100 == 0:
+            if payload_length >= 5000 or self._world_update_log_counter % 500 == 0:
+                print_debug(
+                    self.get_type(),
+                    f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
+                )
+        elif event_code.value in (76, 89, 95):
+            self._world_update_log_counter += 1
+            if self._world_update_log_counter % 300 == 0:
                 print_debug(
                     self.get_type(),
                     f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",

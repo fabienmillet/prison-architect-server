@@ -1,5 +1,5 @@
 from time import monotonic
-from typing import Dict, List, Optional, cast
+from typing import Dict, List, Optional, Tuple, cast
 
 from server.local_servers.common import raised_event_to_event_packet
 from server.models.actor_properties import ActorProperties
@@ -23,6 +23,7 @@ class GameObject(GameListEntry):
     _connected_players: Dict[int, PhotonClientSocket]  # ActorNr: Player
     _next_player_num: int
     _last_world_update_forward_at: Dict[int, float]
+    _last_event_forward_at: Dict[Tuple[int, int], float]
 
     def __init__(
         self,
@@ -47,6 +48,7 @@ class GameObject(GameListEntry):
         self._connected_players = {}
         self._next_player_num = 0
         self._last_world_update_forward_at = {}
+        self._last_event_forward_at = {}
 
     def update_custom_properties(self, custom_properties: GameProperties):
         self._custom_properties.update(custom_properties)
@@ -114,6 +116,9 @@ class GameObject(GameListEntry):
     def remove_player(self, player_num: int):
         self._connected_players.pop(player_num, None)
         self._last_world_update_forward_at.pop(player_num, None)
+        self._last_event_forward_at = {
+            k: v for k, v in self._last_event_forward_at.items() if k[0] != player_num
+        }
         self.player_count = len(self._connected_players)
 
     def _new_player_num(self) -> int:
@@ -138,9 +143,18 @@ class GameObject(GameListEntry):
                 raise RuntimeError("Player not found!")
 
         code_param = event_packet.get_payload().params.get(ParameterKey.Code)
-        is_world_update = (
-            isinstance(code_param, Int8Parameter) and code_param.value == 9
-        )
+        event_code = code_param.value if isinstance(code_param, Int8Parameter) else -1
+        is_world_update = event_code == 9
+        is_micro_spam_event = event_code in {76, 89, 95}
+
+        payload_size = 0
+        payload_param = event_packet.get_payload().params.get(ParameterKey.Data)
+        if payload_param is not None:
+            try:
+                payload_size = len(payload_param.serialize())
+            except Exception:
+                payload_size = 0
+
         now = monotonic()
 
         for actor_num, player in self._connected_players.items():
@@ -149,10 +163,12 @@ class GameObject(GameListEntry):
             if to_players is not None and actor_num not in to_players:
                 continue
 
+            queue_depth = player.get_outgoing_depth()
+
             # World updates are high-frequency and mostly replace older state.
             # If a recipient is heavily backlogged, drop older world updates so
             # critical packets can continue flowing and prevent visible freezes.
-            if is_world_update and player.get_outgoing_depth() > 1000:
+            if is_world_update and queue_depth > 1000:
                 continue
 
             if is_world_update:
@@ -162,6 +178,25 @@ class GameObject(GameListEntry):
                 if now - last_forward < 0.02:
                     continue
                 self._last_world_update_forward_at[actor_num] = now
+
+            if is_micro_spam_event:
+                # These events can appear in long bursts on large maps.
+                # Forward at a controlled cadence per recipient.
+                key = (actor_num, event_code)
+                last_forward = self._last_event_forward_at.get(key, 0.0)
+                min_gap = 0.08 if event_code == 95 else 0.05
+                if now - last_forward < min_gap:
+                    continue
+                self._last_event_forward_at[key] = now
+
+            # Large event payload bursts can overload slower clients.
+            # Apply conservative shedding only under queue pressure.
+            if event_code == 3 and payload_size >= 16000 and queue_depth > 200:
+                key = (actor_num, event_code)
+                last_forward = self._last_event_forward_at.get(key, 0.0)
+                if now - last_forward < 0.1:
+                    continue
+                self._last_event_forward_at[key] = now
 
             event_to_send = raised_event_to_event_packet(
                 from_player=from_player, raised_event=event_packet

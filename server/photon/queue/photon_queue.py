@@ -350,9 +350,13 @@ class PhotonQueue:
                     ):
                         should_log = True
                         try:
-                            # WorldUpdate (event code 9) is extremely frequent.
-                            # Logging every packet adds significant overhead.
-                            should_log = int(packet.get_payload().operation_code) != 9
+                            # Some events are extremely frequent on large maps.
+                            # Logging each send adds significant overhead.
+                            noisy_codes = {9, 76, 89, 95}
+                            should_log = (
+                                int(packet.get_payload().operation_code)
+                                not in noisy_codes
+                            )
                         except Exception:
                             should_log = True
 
