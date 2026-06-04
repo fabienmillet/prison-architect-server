@@ -37,6 +37,8 @@ class GameServer(ServerBase):
     _empty_game_since: Dict[str, float]
     _empty_game_ttl_seconds: int
     _world_update_log_counter: int
+    _last_props_broadcast_at: Dict[Tuple[str, int], float]
+    _last_props_broadcast_sig: Dict[Tuple[str, int], str]
 
     def __init__(self):
         super().__init__(Settings().get_listen_host(), 4531)
@@ -48,6 +50,8 @@ class GameServer(ServerBase):
         # Keep empty games for a while so clients can reconnect without losing the room.
         self._empty_game_ttl_seconds = 300
         self._world_update_log_counter = 0
+        self._last_props_broadcast_at = {}
+        self._last_props_broadcast_sig = {}
 
     @staticmethod
     def _resolve_player_name(
@@ -411,7 +415,7 @@ class GameServer(ServerBase):
                     self.get_type(),
                     f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
                 )
-        elif event_code.value in (76, 89, 95):
+        elif event_code.value in (13, 14, 22, 76, 89, 95):
             self._world_update_log_counter += 1
             if self._world_update_log_counter % 300 == 0:
                 print_debug(
@@ -465,6 +469,22 @@ class GameServer(ServerBase):
             return
 
         current_game = self._games_manager[game_id]
+        props_snapshot = client.get_custom_properties().to_hashtable()
+        now = time()
+        cache_key = (game_id, actor_num)
+        props_sig = repr(props_snapshot.value)
+
+        # Coalesce ultra-frequent SetProperties updates to avoid flooding peers.
+        last_sig = self._last_props_broadcast_sig.get(cache_key)
+        last_ts = self._last_props_broadcast_at.get(cache_key, 0.0)
+        if props_sig == last_sig and now - last_ts < 0.5:
+            return
+        if now - last_ts < 0.05:
+            self._last_props_broadcast_sig[cache_key] = props_sig
+            return
+
+        self._last_props_broadcast_sig[cache_key] = props_sig
+        self._last_props_broadcast_at[cache_key] = now
 
         for other_num, other_client in current_game.get_connected_players().items():
             if other_num == actor_num:
@@ -474,7 +494,7 @@ class GameServer(ServerBase):
                 cast(OperationCode, 0xFD),  # PropertiesChanged event
                 {
                     ParameterKey.TargetActorNr: Int32Parameter(actor_num),
-                    ParameterKey.Properties: client.get_custom_properties().to_hashtable(),
+                    ParameterKey.Properties: props_snapshot,
                 },
             )
             other_client.send(update_event)

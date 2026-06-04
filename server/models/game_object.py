@@ -145,7 +145,7 @@ class GameObject(GameListEntry):
         code_param = event_packet.get_payload().params.get(ParameterKey.Code)
         event_code = code_param.value if isinstance(code_param, Int8Parameter) else -1
         is_world_update = event_code == 9
-        is_micro_spam_event = event_code in {76, 89, 95}
+        is_micro_spam_event = event_code in {13, 14, 22, 76, 89, 95}
 
         payload_size = 0
         payload_param = event_packet.get_payload().params.get(ParameterKey.Data)
@@ -184,7 +184,12 @@ class GameObject(GameListEntry):
                 # Forward at a controlled cadence per recipient.
                 key = (actor_num, event_code)
                 last_forward = self._last_event_forward_at.get(key, 0.0)
-                min_gap = 0.08 if event_code == 95 else 0.05
+                if event_code == 95:
+                    min_gap = 0.08
+                elif event_code in {13, 14, 22}:
+                    min_gap = 0.02
+                else:
+                    min_gap = 0.05
                 if now - last_forward < min_gap:
                     continue
                 self._last_event_forward_at[key] = now
