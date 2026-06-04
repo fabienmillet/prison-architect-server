@@ -55,6 +55,8 @@ class PhotonQueue:
     _last_close_reason: Optional[str]
     _keep_alive_soft_timeout: int
     _keep_alive_hard_timeout: int
+    _max_send_batch_bytes: int
+    _max_send_batch_packets: int
     _stream_parser: PhotonStreamParser
 
     def __init__(self, sock: socket, remote_name: str, server_type: ServerType) -> None:
@@ -74,6 +76,9 @@ class PhotonQueue:
         # Be resilient to short network stalls once a player is connected.
         self._keep_alive_soft_timeout = max(base_timeout, 30)
         self._keep_alive_hard_timeout = max(base_timeout * 4, 120)
+        # Batch outgoing packets to reduce syscall overhead during large-map bursts.
+        self._max_send_batch_bytes = 256 * 1024
+        self._max_send_batch_packets = 32
         self._stream_parser = PhotonStreamParser()
         self._private_key = None
 
@@ -289,17 +294,42 @@ class PhotonQueue:
             except Empty:
                 continue
             try:
-                self._recrypt(outgoing_packet)
-                serialized_data = outgoing_packet.serialize()
-                if isinstance(outgoing_packet, PhotonOperationPacket):
-                    msg = f"Sending: {outgoing_packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {outgoing_packet.get_payload().get_operation_name()}"
-                    print_debug(
-                        self._server_type,
-                        msg,
-                    )
+                packets_to_send = [outgoing_packet]
+                while len(packets_to_send) < self._max_send_batch_packets:
+                    try:
+                        packets_to_send.append(self._outgoing.get_nowait())
+                    except Empty:
+                        break
+
+                send_chunks = []
+                total_batch_size = 0
+                for packet in packets_to_send:
+                    self._recrypt(packet)
+                    serialized_data = packet.serialize()
+                    if isinstance(packet, PhotonOperationPacket):
+                        msg = f"Queue send: {packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {packet.get_payload().get_operation_name()}"
+                        print_debug(
+                            self._server_type,
+                            msg,
+                        )
+
+                    if (
+                        send_chunks
+                        and total_batch_size + len(serialized_data)
+                        > self._max_send_batch_bytes
+                    ):
+                        self._outgoing.put(packet)
+                        break
+
+                    send_chunks.append(serialized_data)
+                    total_batch_size += len(serialized_data)
+
                 if self._closing:
                     return
-                self._sock.sendall(serialized_data)
+                if not send_chunks:
+                    continue
+
+                self._sock.sendall(b"".join(send_chunks))
                 self._last_keep_alive = time()
             except ConnectionAbortedError:
                 print_error(
