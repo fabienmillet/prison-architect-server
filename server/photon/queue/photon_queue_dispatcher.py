@@ -1,4 +1,12 @@
-from socket import AF_INET, SO_REUSEADDR, SOCK_STREAM, SOL_SOCKET, socket
+from socket import (
+    AF_INET,
+    SO_RCVBUF,
+    SO_REUSEADDR,
+    SO_SNDBUF,
+    SOCK_STREAM,
+    SOL_SOCKET,
+    socket,
+)
 from threading import Lock, Thread
 from types import TracebackType
 from typing import Generator, List, Optional, Tuple, Type
@@ -38,7 +46,7 @@ class PhotonQueueDispatcher:
     def __enter__(self):
         self._server_sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
         self._server_sock.bind((self._bind_if, self._bind_port))
-        self._server_sock.listen(5)
+        self._server_sock.listen(64)
         print_success(
             self._server_type, f"Server listening on {self._bind_if}:{self._bind_port}"
         )
@@ -68,6 +76,10 @@ class PhotonQueueDispatcher:
                 if self._closing:
                     break
                 continue
+
+            # Increase OS socket buffers to better absorb bursty large-map traffic.
+            sock.setsockopt(SOL_SOCKET, SO_SNDBUF, 1024 * 1024)
+            sock.setsockopt(SOL_SOCKET, SO_RCVBUF, 1024 * 1024)
             print_success(
                 self._server_type, f"New client connected: {addr[0]}:{addr[1]}"
             )

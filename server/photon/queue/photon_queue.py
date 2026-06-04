@@ -57,6 +57,7 @@ class PhotonQueue:
     _keep_alive_hard_timeout: int
     _max_send_batch_bytes: int
     _max_send_batch_packets: int
+    _last_backpressure_log: float
     _stream_parser: PhotonStreamParser
 
     def __init__(self, sock: socket, remote_name: str, server_type: ServerType) -> None:
@@ -77,8 +78,9 @@ class PhotonQueue:
         self._keep_alive_soft_timeout = max(base_timeout, 30)
         self._keep_alive_hard_timeout = max(base_timeout * 4, 120)
         # Batch outgoing packets to reduce syscall overhead during large-map bursts.
-        self._max_send_batch_bytes = 256 * 1024
-        self._max_send_batch_packets = 32
+        self._max_send_batch_bytes = 512 * 1024
+        self._max_send_batch_packets = 64
+        self._last_backpressure_log = 0
         self._stream_parser = PhotonStreamParser()
         self._private_key = None
 
@@ -306,7 +308,10 @@ class PhotonQueue:
                 for packet in packets_to_send:
                     self._recrypt(packet)
                     serialized_data = packet.serialize()
-                    if isinstance(packet, PhotonOperationPacket):
+                    if (
+                        isinstance(packet, PhotonOperationPacket)
+                        and Settings().get_verbosity() <= 0
+                    ):
                         msg = f"Queue send: {packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {packet.get_payload().get_operation_name()}"
                         print_debug(
                             self._server_type,
@@ -331,6 +336,15 @@ class PhotonQueue:
 
                 self._sock.sendall(b"".join(send_chunks))
                 self._last_keep_alive = time()
+
+                queue_depth = self._outgoing.qsize()
+                now = time()
+                if queue_depth > 2000 and (now - self._last_backpressure_log) >= 5:
+                    print_warning(
+                        self._server_type,
+                        f"Backpressure on {self.remote_name}: outgoing queue depth={queue_depth}",
+                    )
+                    self._last_backpressure_log = now
             except ConnectionAbortedError:
                 print_error(
                     self._server_type,
