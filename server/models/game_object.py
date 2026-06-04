@@ -146,7 +146,6 @@ class GameObject(GameListEntry):
         event_code = code_param.value if isinstance(code_param, Int8Parameter) else -1
         is_world_update = event_code == 9
         is_micro_spam_event = event_code in {76, 89, 95}
-        is_large_state_event = event_code == 3
 
         payload_size = 0
         payload_param = event_packet.get_payload().params.get(ParameterKey.Data)
@@ -188,39 +187,6 @@ class GameObject(GameListEntry):
                 min_gap = 0.08 if event_code == 95 else 0.05
                 if now - last_forward < min_gap:
                     continue
-                self._last_event_forward_at[key] = now
-
-            # Large event payload bursts can overload slower clients.
-            # Apply conservative shedding only under queue pressure.
-            if event_code == 3 and payload_size >= 16000 and queue_depth > 200:
-                key = (actor_num, event_code)
-                last_forward = self._last_event_forward_at.get(key, 0.0)
-                if now - last_forward < 0.1:
-                    continue
-                self._last_event_forward_at[key] = now
-
-            if is_large_state_event:
-                # Event 3 can carry very large state chunks (10KB-32KB+).
-                # Hard-limit per-recipient cadence to prevent client render/network stalls.
-                key = (actor_num, event_code)
-                last_forward = self._last_event_forward_at.get(key, 0.0)
-
-                min_gap = 0.0
-                if payload_size >= 28000:
-                    min_gap = 0.25
-                elif payload_size >= 12000:
-                    min_gap = 0.12
-                elif payload_size >= 6000:
-                    min_gap = 0.06
-
-                if queue_depth > 600:
-                    min_gap = max(min_gap, 0.2)
-                elif queue_depth > 300:
-                    min_gap = max(min_gap, 0.1)
-
-                if min_gap > 0 and now - last_forward < min_gap:
-                    continue
-
                 self._last_event_forward_at[key] = now
 
             event_to_send = raised_event_to_event_packet(
