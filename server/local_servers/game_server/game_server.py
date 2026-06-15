@@ -393,46 +393,14 @@ class GameServer(ServerBase):
         event_code = code_param
         data_param = params[ParameterKey.Data]
 
-        payload_length = 0
-        try:
-            payload_length = len(data_param.serialize())
-        except Exception:
-            payload_length = -1
-
         recieving_actors = cast(
             SliceParameter[Int32Parameter] | None,
             params.get(ParameterKey.Actors, None),
         )
 
-        noisy_codes = {2, 3, 13, 14, 22, 47, 76, 89, 93, 95, 118, 119}
-
-        if event_code.value == 9:
-            self._world_update_log_counter += 1
-            if payload_length >= 5000 or self._world_update_log_counter % 500 == 0:
-                print_debug(
-                    self.get_type(),
-                    f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
-                )
-        elif event_code.value == 3:
-            self._world_update_log_counter += 1
-            # Event 3 can be very frequent and large; sample aggressively.
-            if payload_length >= 30000 or self._world_update_log_counter % 250 == 0:
-                print_debug(
-                    self.get_type(),
-                    f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
-                )
-        elif event_code.value in noisy_codes:
-            self._world_update_log_counter += 1
-            if self._world_update_log_counter % 300 == 0:
-                print_debug(
-                    self.get_type(),
-                    f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
-                )
-        else:
-            print_debug(
-                self.get_type(),
-                f"Raising event {event_code.value} for game {game_id} with payload length: {payload_length}",
-            )
+        # Removed terminal output for RaiseEvent here. Printing thousands of events
+        # per minute artificially limits server performance because stdout on Windows
+        # is blocking and pauses the entire Python process.
 
         to_players = None
         if recieving_actors is not None:

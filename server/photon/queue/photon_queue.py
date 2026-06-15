@@ -1,7 +1,7 @@
 from queue import Empty, Queue
 from select import select
 from socket import socket, timeout as SocketTimeout
-from threading import Thread
+from threading import Thread, Event
 from time import sleep, time
 from types import TracebackType
 from typing import Optional, Type
@@ -47,7 +47,6 @@ class PhotonQueue:
 
     _recv_worker: Thread
     _send_worker: Thread
-    _check_keep_alive_worker: Thread
 
     _server_type: ServerType
     remote_name: str
@@ -57,8 +56,15 @@ class PhotonQueue:
     _keep_alive_soft_timeout: int
     _keep_alive_hard_timeout: int
     _stream_parser: PhotonStreamParser
+    _packet_ready_event: Optional[Event]
 
-    def __init__(self, sock: socket, remote_name: str, server_type: ServerType) -> None:
+    def __init__(
+        self,
+        sock: socket,
+        remote_name: str,
+        server_type: ServerType,
+        packet_ready_event: Optional[Event] = None,
+    ) -> None:
         self._init_time = time()
         self._sock = sock
         # Keep socket blocking for sendall stability on large payload bursts.
@@ -70,6 +76,7 @@ class PhotonQueue:
         self._incoming = Queue()
         self._outgoing_high = Queue()
         self._outgoing = Queue()
+        self._packet_ready_event = packet_ready_event
         self._last_keep_alive = time()
         self._last_close_reason = None
         base_timeout = Settings().get_timeout()
@@ -92,10 +99,6 @@ class PhotonQueue:
         self._send_worker = Thread(
             target=self._handle_send,
             name=f"Server Send Worker ({server_type.value})",
-        )
-        self._check_keep_alive_worker = Thread(
-            target=self._check_keep_alive,
-            name=f"Server KeepAlive Check Worker ({server_type.value})",
         )
 
     def get_aes_key(self) -> bytes | None:
@@ -179,6 +182,8 @@ class PhotonQueue:
                             self._handle_dh_response(packet)
                             continue
                         self._incoming.put(packet)
+                        if self._packet_ready_event:
+                            self._packet_ready_event.set()
                 except RuntimeError as ex:
                     print_error(
                         self._server_type,
@@ -198,7 +203,6 @@ class PhotonQueue:
     def __enter__(self):
         self._send_worker.start()
         self._recv_worker.start()
-        self._check_keep_alive_worker.start()
         return self
 
     def __exit__(
@@ -210,7 +214,6 @@ class PhotonQueue:
         self._close_socket("context_exit")
         self._recv_worker.join(5)
         self._send_worker.join(5)
-        self._check_keep_alive_worker.join(5)
 
     def pop(self) -> PhotonDataPacket | None:
         if self._incoming.empty():
@@ -279,24 +282,24 @@ class PhotonQueue:
     def _handle_init_request(self, _packet: InitRequestPacket) -> None:
         self.push(InitResponsePacket(), high_priority=True)
 
-    def _check_keep_alive(self):
-        while not self._closing:
-            sleep(1)
-            idle_seconds = time() - self._last_keep_alive
-            if idle_seconds > self._keep_alive_hard_timeout:
-                print_warning(
-                    self._server_type,
-                    f"{self.remote_name} timed out after {int(idle_seconds)}s idle. Closing socket.",
-                )
-                self._close_socket(f"keep_alive_hard_timeout:{int(idle_seconds)}s")
-                self._last_keep_alive = time()
-                continue
+    def check_keep_alive(self):
+        if self._closing:
+            return
+        idle_seconds = time() - self._last_keep_alive
+        if idle_seconds > self._keep_alive_hard_timeout:
+            print_warning(
+                self._server_type,
+                f"{self.remote_name} timed out after {int(idle_seconds)}s idle. Closing socket.",
+            )
+            self._close_socket(f"keep_alive_hard_timeout:{int(idle_seconds)}s")
+            self._last_keep_alive = time()
+            return
 
-            if idle_seconds > self._keep_alive_soft_timeout:
-                print_debug(
-                    self._server_type,
-                    f"{self.remote_name} keep-alive idle for {int(idle_seconds)}s (soft threshold {self._keep_alive_soft_timeout}s).",
-                )
+        if idle_seconds > self._keep_alive_soft_timeout:
+            print_debug(
+                self._server_type,
+                f"{self.remote_name} keep-alive idle for {int(idle_seconds)}s (soft threshold {self._keep_alive_soft_timeout}s).",
+            )
 
     def _handle_send(self):
         while not self._closing:
@@ -304,22 +307,16 @@ class PhotonQueue:
                 outgoing_packet = self._outgoing_high.get_nowait()
             except Empty:
                 try:
-                    outgoing_packet = self._outgoing.get(timeout=0.5)
+                    # Lowered timeout to 0.05s so high priority packets (like handshakes)
+                    # aren't delayed by half a second if the main queue is empty.
+                    outgoing_packet = self._outgoing.get(timeout=0.05)
                 except Empty:
                     continue
             try:
                 self._recrypt(outgoing_packet)
                 serialized_data = outgoing_packet.serialize()
 
-                if (
-                    isinstance(outgoing_packet, PhotonOperationPacket)
-                    and Settings().get_verbosity() <= 0
-                ):
-                    msg = f"Queue send: {outgoing_packet.get_header().get_command_name()}, Length: {len(serialized_data)}, Operation: {outgoing_packet.get_payload().get_operation_name()}"
-                    print_debug(
-                        self._server_type,
-                        msg,
-                    )
+                # Removed excessive logging here because terminal I/O causes huge freezes.
 
                 if self._closing:
                     return

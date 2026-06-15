@@ -1,13 +1,16 @@
 from socket import (
     AF_INET,
+    IPPROTO_TCP,
     SO_RCVBUF,
     SO_REUSEADDR,
     SO_SNDBUF,
     SOCK_STREAM,
     SOL_SOCKET,
+    TCP_NODELAY,
     socket,
 )
-from threading import Lock, Thread
+from threading import Lock, Thread, Event
+from time import sleep
 from types import TracebackType
 from typing import Generator, List, Optional, Tuple, Type
 
@@ -21,11 +24,13 @@ from server.photon.queue.photon_client_socket import PhotonClientSocket
 class PhotonQueueDispatcher:
     _clients: List[PhotonClientSocket]
     _client_accepter_worker: Thread
+    _global_keep_alive_worker: Thread
     _server_sock: socket
     _bind_if: str
     _bind_port: int
     _closing: bool
     _clients_lock: Lock
+    _packet_ready_event: Event
 
     def __init__(
         self, server_type: ServerType, bind_interface: str, bind_port: int
@@ -38,6 +43,10 @@ class PhotonQueueDispatcher:
         self._client_accepter_worker = Thread(
             target=self._client_accepter, name="Client Accepter Worker"
         )
+        self._global_keep_alive_worker = Thread(
+            target=self._keep_alive_loop, name="Global KeepAlive Worker"
+        )
+        self._packet_ready_event = Event()
 
         self._clients = []
         self._clients_lock = Lock()
@@ -52,6 +61,7 @@ class PhotonQueueDispatcher:
         )
 
         self._client_accepter_worker.start()
+        self._global_keep_alive_worker.start()
 
         return self
 
@@ -67,6 +77,15 @@ class PhotonQueueDispatcher:
         except Exception:
             pass
         self._client_accepter_worker.join(5)
+        self._global_keep_alive_worker.join(5)
+
+    def _keep_alive_loop(self):
+        while not self._closing:
+            sleep(1)
+            clients_snapshot = self.get_clients()
+            for client in clients_snapshot:
+                if not client.is_disconnected():
+                    client._queue.check_keep_alive()
 
     def _client_accepter(self):
         while not self._closing:
@@ -78,16 +97,17 @@ class PhotonQueueDispatcher:
                 continue
 
             try:
-                # Increase OS socket buffers to better absorb bursty large-map traffic.
-                sock.setsockopt(SOL_SOCKET, SO_SNDBUF, 1024 * 1024)
-                sock.setsockopt(SOL_SOCKET, SO_RCVBUF, 1024 * 1024)
+                # Disable Nagle's algorithm for instant packet transmission.
+                # (Without modifying SO_RCVBUF to avoid loopback stalling on Windows).
+                sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+                
                 print_success(
                     self._server_type, f"New client connected: {addr[0]}:{addr[1]}"
                 )
                 with self._clients_lock:
                     self._clients.append(
                         PhotonClientSocket(
-                            sock=sock, addr=addr, server_type=self._server_type
+                            sock=sock, addr=addr, server_type=self._server_type, packet_ready_event=self._packet_ready_event
                         )
                     )
             except Exception as ex:
@@ -125,3 +145,7 @@ class PhotonQueueDispatcher:
     def get_clients(self) -> List[PhotonClientSocket]:
         with self._clients_lock:
             return list(self._clients)
+
+    def wait_for_packets(self, timeout: float) -> None:
+        self._packet_ready_event.wait(timeout)
+        self._packet_ready_event.clear()

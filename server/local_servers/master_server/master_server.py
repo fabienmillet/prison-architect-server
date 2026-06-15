@@ -205,6 +205,14 @@ class MasterServer(ServerBase):
     def _game_list_updater(self) -> None:
         while self._running:
             sleep(5)
-            for client in self._dispatcher.get_clients():
-                self._send_game_list_update(client)
-                sleep(0.1)
+            clients = self._dispatcher.get_clients()
+            if not clients:
+                continue
+            
+            # Build the packet exactly once for all clients
+            packet = PacketFactory.event(
+                EventCode.GameListUpdate,
+                params=PacketFactory.game_list_params(GamesManager()),
+            )
+            for client in clients:
+                client.send(packet)

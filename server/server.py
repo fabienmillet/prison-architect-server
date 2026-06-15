@@ -13,11 +13,15 @@ def _process_internal(server_instance: ServerBase) -> None:
     had_packets = False
     for client, packet in server_instance.process():
         if (
-            server_instance.get_type() == ServerType.NameServer
+            server_instance.get_type() in (ServerType.NameServer, ServerType.MasterServer)
             and isinstance(packet, PhotonOperationPacket)
-            and packet.get_payload().operation_code == OperationCode.RaiseEvent
+            and packet.get_payload().operation_code in (
+                OperationCode.RaiseEvent,
+                OperationCode.SetProperties,
+                OperationCode.GetProperties,
+            )
         ):
-            # NameServer is discovery/auth only; gameplay RaiseEvent noise is ignored.
+            # NameServer/MasterServer are discovery/auth only; gameplay noise is ignored.
             continue
 
         had_packets = True
@@ -28,8 +32,12 @@ def _process_internal(server_instance: ServerBase) -> None:
         print_packet_log(server_instance.get_type(), packet, printer=print_error)
 
     if not had_packets:
-        # Lower idle polling delay to reduce visible stutter on forwarded gameplay events.
-        sleep(0.01)
+        # Instead of a hard sleep, we wait on an Event. This gives 0ms latency 
+        # because the Event wakes us instantly the millisecond a packet is queued.
+        if hasattr(server_instance, "wait_for_packets"):
+            server_instance.wait_for_packets(0.01)
+        else:
+            sleep(0.01)
 
 
 def _name_server():
@@ -96,14 +104,16 @@ def _game_server():
 
 
 def main():
-    name_server_worker = Thread(target=_name_server, name="NameServer Worker")
-    master_server_worker = Thread(target=_master_server, name="MasterServer Worker")
-    game_server_worker = Thread(target=_game_server, name="GameServer Worker")
+    name_server_worker = Thread(target=_name_server, name="NameServer Worker", daemon=True)
+    master_server_worker = Thread(target=_master_server, name="MasterServer Worker", daemon=True)
+    game_server_worker = Thread(target=_game_server, name="GameServer Worker", daemon=True)
 
     name_server_worker.start()
     master_server_worker.start()
     game_server_worker.start()
 
-    game_server_worker.join()
-    master_server_worker.join()
-    name_server_worker.join()
+    try:
+        while True:
+            sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down servers...")

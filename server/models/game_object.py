@@ -132,15 +132,17 @@ class GameObject(GameListEntry):
             if from_player == -1:
                 raise RuntimeError("Player not found!")
 
+        # Create the packet exactly once to avoid redundant allocations for every player.
+        event_to_send = raised_event_to_event_packet(
+            from_player=from_player, raised_event=event_packet
+        )
+
         for actor_num, player in self._connected_players.items():
             if player == from_player:
                 continue
             if to_players is not None and actor_num not in to_players:
                 continue
 
-            event_to_send = raised_event_to_event_packet(
-                from_player=from_player, raised_event=event_packet
-            )
             player.send(event_to_send)
 
     def get_id(self) -> str:
