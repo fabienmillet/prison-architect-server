@@ -54,7 +54,8 @@ if (-not (Test-Path $hostsPath)) {
     exit 1
 }
 
-$lines = Get-Content -Path $hostsPath -ErrorAction Stop
+# Force array type so that if the file has only 1 line, it doesn't default to a string.
+$lines = @(Get-Content -Path $hostsPath -ErrorAction Stop)
 
 if ($Remove) {
     $newLines = @()
